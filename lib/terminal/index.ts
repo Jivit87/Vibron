@@ -29,6 +29,14 @@ import { LineTracker, OutputBuffer, detectLocalUrl } from "./output";
 import { classifyCommand, scrubEnv } from "./safety";
 import { condenseOutput } from "@/lib/verify/extract";
 import { repoEnvPrelude } from "@/lib/verify/env";
+import {
+  isDockerAvailable,
+  startSandbox,
+  stopSandbox,
+  spawnInSandbox,
+  type SandboxSession,
+  type SandboxConfig,
+} from "@/lib/sandbox";
 
 export { classifyCommand, scrubEnv, type CommandVerdict } from "./safety";
 
@@ -64,6 +72,8 @@ export interface TerminalSession {
   /** Resolves once the process has closed (or failed to start). */
   done: Promise<void>;
   lineTracker: LineTracker;
+  /** Docker sandbox session, if sandboxing is enabled. */
+  sandboxSession: SandboxSession | null;
 }
 
 /**
@@ -72,17 +82,61 @@ export interface TerminalSession {
  */
 const REGISTRY_KEY = Symbol.for("viberon.terminal.sessions");
 const EXIT_HOOK_KEY = Symbol.for("viberon.terminal.exitHook");
+const PRUNE_INTERVAL_KEY = Symbol.for("viberon.terminal.pruneInterval");
 type GlobalWithRegistry = typeof globalThis & {
   [REGISTRY_KEY]?: Map<string, TerminalSession>;
   [EXIT_HOOK_KEY]?: boolean;
+  [PRUNE_INTERVAL_KEY]?: ReturnType<typeof setInterval>;
 };
 const registryHost = globalThis as GlobalWithRegistry;
 const sessions: Map<string, TerminalSession> =
   registryHost[REGISTRY_KEY] ?? new Map();
 registryHost[REGISTRY_KEY] = sessions;
 
+/**
+ * Bug fix (High #6 — Terminal Session Memory Leak):
+ * Sessions accumulated indefinitely. pruneSessions() only ran when the
+ * terminal list API was hit. Wire a background interval so sessions are
+ * cleaned up even in headless/agent-only operation.
+ *
+ * Two eviction policies:
+ *  1. Finished sessions older than 1 hour → deleted.
+ *  2. Hard cap of MAX_SESSIONS: if exceeded, oldest finished sessions
+ *     are evicted immediately to prevent unbounded growth.
+ */
+const MAX_SESSIONS = 200;
+const PRUNE_INTERVAL_MS = 10 * 60 * 1_000; // 10 minutes
+const FINISHED_SESSION_TTL_MS = 60 * 60 * 1_000; // 1 hour
+
+function pruneSessionsInternal(): void {
+  const cutoff = Date.now() - FINISHED_SESSION_TTL_MS;
+  for (const [id, session] of sessions) {
+    if (session.status !== "running" && (session.endedAt ?? 0) < cutoff) {
+      sessions.delete(id);
+    }
+  }
+  // Hard cap: evict oldest finished sessions when over the limit.
+  if (sessions.size > MAX_SESSIONS) {
+    const finished = [...sessions.entries()]
+      .filter(([, s]) => s.status !== "running")
+      .sort(([, a], [, b]) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+    const toEvict = finished.slice(0, sessions.size - MAX_SESSIONS);
+    for (const [id] of toEvict) sessions.delete(id);
+  }
+}
+
+// Install the background pruning interval exactly once (survives HMR).
+if (!registryHost[PRUNE_INTERVAL_KEY]) {
+  const interval = setInterval(pruneSessionsInternal, PRUNE_INTERVAL_MS);
+  if (typeof interval === "object" && "unref" in interval) {
+    (interval as { unref(): void }).unref(); // Don't prevent Node.js from exiting.
+  }
+  registryHost[PRUNE_INTERVAL_KEY] = interval;
+}
+
 const MAX_CHUNKS_PER_SESSION = 2000;
 const IS_WINDOWS = process.platform === "win32";
+const CONTAINER_WORKSPACE = "/workspace"; // Sandbox container workspace mount point
 
 /* --------------------------- process groups ------------------------------ */
 
@@ -125,6 +179,10 @@ export function killAllSessions(): number {
     if (session.child?.pid && (session.status === "running" || groupAlive(session.child.pid))) {
       if (session.status === "running") session.status = "killed";
       signalTree(session.child, "SIGKILL");
+      // Clean up sandbox container if present
+      if (session.sandboxSession) {
+        void stopSandbox(session.sandboxSession).catch(() => {});
+      }
       count++;
     }
   }
@@ -169,6 +227,21 @@ export interface RunOptions {
    * `python` → `python3` shim when needed, no .pyc files written.
    */
   repoEnv?: boolean;
+  /**
+   * Docker sandbox configuration. When enabled, commands run in an isolated
+   * container with resource limits and network restrictions.
+   */
+  sandbox?: {
+    enabled: boolean;
+    image?: string;
+    memoryMb?: number;
+    cpus?: number;
+    pidsLimit?: number;
+    network?: "none" | "host" | "bridge" | "restricted";
+    allowedDomains?: string[];
+    startupTimeoutMs?: number;
+    extraArgs?: string[];
+  };
 }
 
 function pushChunk(
@@ -195,48 +268,13 @@ function pushChunk(
 }
 
 /**
- * Start a command. Returns immediately with a session — callers stream via
- * `subscribe` or await `waitFor`.
+ * Direct execution (no sandbox) - existing Viberon behavior.
  */
-export function startCommand(options: RunOptions): TerminalSession {
-  installExitHook();
-  const id = randomUUID();
-  let markDone: () => void = () => {};
-  const done = new Promise<void>((resolve) => {
-    markDone = resolve;
-  });
-  const origin: TerminalOrigin = options.origin ?? "user";
-  const session: TerminalSession = {
-    id,
-    repoKey: options.repoKey,
-    command: options.command,
-    cwd: options.cwd,
-    status: "running",
-    exitCode: null,
-    startedAt: Date.now(),
-    endedAt: null,
-    chunks: [],
-    buffer: new OutputBuffer(),
-    detectedUrl: null,
-    runId: options.runId ?? null,
-    origin,
-    child: null,
-    subscribers: new Set(),
-    done,
-    lineTracker: new LineTracker(),
-  };
-  sessions.set(id, session);
-
-  pushChunk(session, "system", `$ ${options.command}\n`);
-
-  if (options.signal?.aborted) {
-    session.status = "killed";
-    session.endedAt = Date.now();
-    pushChunk(session, "system", "[cancelled before start]\n");
-    markDone();
-    return session;
-  }
-
+function startCommandDirect(
+  session: TerminalSession,
+  options: RunOptions,
+  markDone: () => void,
+): TerminalSession {
   // A login shell resolves the user's real PATH — without it, tools
   // installed via nvm/homebrew/asdf are invisible to spawned processes.
   const shell = IS_WINDOWS ? "cmd.exe" : "/bin/bash";
@@ -258,7 +296,7 @@ export function startCommand(options: RunOptions): TerminalSession {
       },
       // Users can type into their own sessions; agents get EOF on stdin so
       // an interactive prompt fails fast instead of hanging the run.
-      stdio: [origin === "user" ? "pipe" : "ignore", "pipe", "pipe"],
+      stdio: [session.origin === "user" ? "pipe" : "ignore", "pipe", "pipe"],
       detached: !IS_WINDOWS,
     });
   } catch (error) {
@@ -307,6 +345,134 @@ export function startCommand(options: RunOptions): TerminalSession {
     markDone();
   });
 
+  setupCleanups(session, options, markDone);
+  return session;
+}
+
+/**
+ * Sandbox execution - spawn command in Docker container.
+ */
+function startCommandInSandbox(
+  session: TerminalSession,
+  options: RunOptions,
+  markDone: () => void,
+): TerminalSession {
+  // Check Docker availability
+  if (!isDockerAvailable()) {
+    pushChunk(
+      session,
+      "system",
+      "[sandbox requested but Docker is not available; falling back to direct execution]\n",
+    );
+    return startCommandDirect(session, options, markDone);
+  }
+
+  pushChunk(session, "system", "[starting sandbox container...]\n");
+
+  // Start sandbox container asynchronously
+  void (async () => {
+    try {
+      const sandboxConfig: SandboxConfig = {
+        enabled: true,
+        image: options.sandbox?.image,
+        memoryMb: options.sandbox?.memoryMb,
+        cpus: options.sandbox?.cpus,
+        pidsLimit: options.sandbox?.pidsLimit,
+        network: options.sandbox?.network,
+        allowedDomains: options.sandbox?.allowedDomains,
+        startupTimeoutMs: options.sandbox?.startupTimeoutMs,
+        extraArgs: options.sandbox?.extraArgs,
+      };
+
+      const sandboxSession = await startSandbox(options.cwd, sandboxConfig);
+      session.sandboxSession = sandboxSession;
+
+      pushChunk(
+        session,
+        "system",
+        `[sandbox ready: ${sandboxSession.containerName}]\n`,
+      );
+
+      // Prepare command with repoEnv if needed
+      const command =
+        options.repoEnv && !IS_WINDOWS
+          ? repoEnvPrelude(options.cwd) + options.command
+          : options.command;
+
+      // Spawn command in sandbox
+      const child = spawnInSandbox(sandboxSession, command, {
+        cwd: CONTAINER_WORKSPACE,
+        env: {
+          ...options.env,
+          FORCE_COLOR: "0",
+          CI: "1",
+          NO_COLOR: "1",
+        },
+      });
+
+      session.child = child;
+
+      child.stdout?.on("data", (buffer: Buffer) => {
+        pushChunk(session, "stdout", buffer.toString("utf8"));
+      });
+      child.stderr?.on("data", (buffer: Buffer) => {
+        pushChunk(session, "stderr", buffer.toString("utf8"));
+      });
+
+      child.on("error", (error) => {
+        if (session.endedAt !== null) return;
+        session.status = "failed";
+        session.endedAt = Date.now();
+        pushChunk(session, "system", `sandbox error: ${error.message}\n`);
+        void stopSandbox(sandboxSession).catch(() => {});
+        markDone();
+      });
+
+      child.on("close", (code, signal) => {
+        if (session.status === "running") {
+          session.status = signal ? "killed" : "exited";
+        }
+        session.exitCode = code;
+        session.endedAt = session.endedAt ?? Date.now();
+        pushChunk(
+          session,
+          "system",
+          signal ? `\n[killed by ${signal}]\n` : `\n[exited with code ${code ?? 0}]\n`,
+        );
+        // Clean up sandbox container
+        void stopSandbox(sandboxSession)
+          .then(() => {
+            pushChunk(session, "system", "[sandbox container stopped]\n");
+          })
+          .catch(() => {});
+        markDone();
+      });
+
+      setupCleanups(session, options, markDone);
+    } catch (error) {
+      session.status = "failed";
+      session.endedAt = Date.now();
+      pushChunk(
+        session,
+        "system",
+        `sandbox startup failed: ${error instanceof Error ? error.message : String(error)}\n[falling back to direct execution]\n`,
+      );
+      // Fall back to direct execution
+      startCommandDirect(session, options, markDone);
+    }
+  })();
+
+  return session;
+}
+
+/**
+ * Set up timeout and abort signal handlers.
+ */
+function setupCleanups(
+  session: TerminalSession,
+  options: RunOptions,
+  _markDone: () => void,
+): void {
   const cleanups: (() => void)[] = [];
   if (options.timeoutMs && options.timeoutMs > 0) {
     const timer = setTimeout(() => {
@@ -316,7 +482,7 @@ export function startCommand(options: RunOptions): TerminalSession {
           "system",
           `\n[timed out after ${Math.round(options.timeoutMs! / 1000)}s]\n`,
         );
-        killSession(id);
+        killSession(session.id);
       }
     }, options.timeoutMs);
     cleanups.push(() => clearTimeout(timer));
@@ -325,15 +491,66 @@ export function startCommand(options: RunOptions): TerminalSession {
     const onAbort = () => {
       if (session.status === "running") {
         pushChunk(session, "system", "\n[cancelled]\n");
-        killSession(id);
+        killSession(session.id);
       }
     };
     options.signal.addEventListener("abort", onAbort, { once: true });
     cleanups.push(() => options.signal!.removeEventListener("abort", onAbort));
   }
-  void done.then(() => cleanups.forEach((fn) => fn()));
+  void session.done.then(() => cleanups.forEach((fn) => fn()));
+}
 
-  return session;
+/**
+ * Start a command. Returns immediately with a session — callers stream via
+ * `subscribe` or await `waitFor`.
+ */
+export function startCommand(options: RunOptions): TerminalSession {
+  installExitHook();
+  const id = randomUUID();
+  let markDone: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    markDone = resolve;
+  });
+  const origin: TerminalOrigin = options.origin ?? "user";
+  const session: TerminalSession = {
+    id,
+    repoKey: options.repoKey,
+    command: options.command,
+    cwd: options.cwd,
+    status: "running",
+    exitCode: null,
+    startedAt: Date.now(),
+    endedAt: null,
+    chunks: [],
+    buffer: new OutputBuffer(),
+    detectedUrl: null,
+    runId: options.runId ?? null,
+    origin,
+    child: null,
+    subscribers: new Set(),
+    done,
+    lineTracker: new LineTracker(),
+    sandboxSession: null,
+  };
+  sessions.set(id, session);
+
+  pushChunk(session, "system", `$ ${options.command}\n`);
+
+  if (options.signal?.aborted) {
+    session.status = "killed";
+    session.endedAt = Date.now();
+    pushChunk(session, "system", "[cancelled before start]\n");
+    markDone();
+    return session;
+  }
+
+  // Sandbox execution path: spawn command in Docker container
+  if (options.sandbox?.enabled) {
+    return startCommandInSandbox(session, options, markDone);
+  }
+
+  // Direct execution path (existing behavior)
+  return startCommandDirect(session, options, markDone);
 }
 
 /** Await completion (or the timeout). Long-running servers never resolve. */
@@ -430,6 +647,12 @@ export function killSession(id: string): boolean {
     if (pid && groupAlive(pid)) signalTree(child, "SIGKILL");
   }, 4000);
   escalate.unref?.();
+  
+  // Clean up sandbox container if present
+  if (session.sandboxSession) {
+    void stopSandbox(session.sandboxSession).catch(() => {});
+  }
+  
   return true;
 }
 
@@ -478,12 +701,7 @@ export function subscribe(
 
 /** Drop finished sessions older than an hour so the map cannot grow forever. */
 export function pruneSessions(): void {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  for (const [id, session] of sessions) {
-    if (session.status !== "running" && (session.endedAt ?? 0) < cutoff) {
-      sessions.delete(id);
-    }
-  }
+  pruneSessionsInternal();
 }
 
 /** Serializable view for API responses. */
