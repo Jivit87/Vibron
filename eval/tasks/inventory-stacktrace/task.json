@@ -1,0 +1,6 @@
+{
+  "title": "Stacktrace: KeyError for unknown SKU (Python, unittest)",
+  "language": "python",
+  "category": "stacktrace",
+  "test_cmd": "python -m unittest discover -s hidden_tests && python -m unittest discover -s tests"
+}

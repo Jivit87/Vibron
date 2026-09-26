@@ -1,0 +1,6 @@
+{
+  "title": "Regression trap: truncate length + custom ellipsis (JavaScript, node --test)",
+  "language": "javascript",
+  "category": "regression-trap",
+  "test_cmd": "node --test hidden_tests/*.test.js test/*.test.js"
+}
