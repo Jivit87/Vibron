@@ -43,6 +43,21 @@ export interface SolveOptions {
    * memory note is written here). Errors are swallowed; the run's result stands.
    */
   onSolved?: (result: SolveResult) => void | Promise<void>;
+  /**
+   * Docker sandbox configuration. When enabled, all commands run in isolated
+   * containers with resource limits and network restrictions.
+   */
+  sandbox?: {
+    enabled: boolean;
+    image?: string;
+    memoryMb?: number;
+    cpus?: number;
+    pidsLimit?: number;
+    network?: "none" | "host" | "bridge" | "restricted";
+    allowedDomains?: string[];
+    startupTimeoutMs?: number;
+    extraArgs?: string[];
+  };
 }
 
 export type SolveStatus = "resolved" | "unverified" | "failed" | "incomplete" | "error";

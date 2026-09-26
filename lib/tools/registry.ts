@@ -123,6 +123,21 @@ export interface ToolContext {
     /** Ask the user to approve a command or edit. Resolves true to allow. */
     requestApproval?: (ask: ApprovalAsk) => Promise<boolean>;
   };
+  /**
+   * Docker sandbox configuration for command execution. When enabled, all
+   * run_command calls execute in isolated containers.
+   */
+  sandbox?: {
+    enabled: boolean;
+    image?: string;
+    memoryMb?: number;
+    cpus?: number;
+    pidsLimit?: number;
+    network?: "none" | "host" | "bridge" | "restricted";
+    allowedDomains?: string[];
+    startupTimeoutMs?: number;
+    extraArgs?: string[];
+  };
 }
 
 export interface ToolImpl {
@@ -545,7 +560,7 @@ const multiEditTool: ToolImpl = {
     if (before === null) return `Error: file not found (${path}).`;
 
     const { text, style } = splitStyle(before);
-    const outcome = multiReplace(text, edits, path);
+    const outcome = multiReplace(text, edits as Parameters<typeof multiReplace>[1], path);
     if ("error" in outcome) return outcome.error;
     const checked = await checkEdit(ctx.editSession, path, text, outcome.after, outcome.notes.join("; "));
     if ("error" in checked) return checked.error;
@@ -911,6 +926,7 @@ const runCommandTool: ToolImpl = {
         signal: ctx.signal,
         runId: ctx.runId,
         origin: "agent",
+        sandbox: ctx.sandbox,
       });
       // Give a server a moment to bind and print its URL.
       await new Promise((resolve) => setTimeout(resolve, 3500));
@@ -936,6 +952,7 @@ const runCommandTool: ToolImpl = {
       origin: "agent",
       // Collect generously; `condense` below decides what the model sees.
       maxOutputChars: 200_000,
+      sandbox: ctx.sandbox,
     });
     if (ctx.signal?.aborted) return "Cancelled: the run was stopped.";
     ctx.events.onCommand?.({
