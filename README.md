@@ -274,6 +274,30 @@ warning — no errors, no disruption.
 See [docs/SANDBOX.md](docs/SANDBOX.md) for configuration, troubleshooting, and
 security details.
 
+### Real-Time Compiler Diagnostics (LSP)
+
+Viberon integrates with Language Server Protocol to provide real-time compiler
+feedback as agents edit code. Type errors, lint warnings, and import issues
+appear immediately in the agent's tool output.
+
+**Supported Languages:**
+- TypeScript/JavaScript (`typescript-language-server`)
+- Python (`pyright-langserver` or `pylsp`)
+- Go (`gopls`)  
+- Rust (`rust-analyzer`)
+
+**Installation:**
+```bash
+npm install -g typescript-language-server
+pip install 'python-lsp-server[all]'  # or: pip install pyright
+go install golang.org/x/tools/gopls@latest
+rustup component add rust-analyzer
+```
+
+**How it works:** After each file edit, LSP diagnostics are automatically
+collected and shown to the agent. No configuration needed—if a language server
+is installed, Viberon uses it.
+
 ---
 
 ## Keyboard
