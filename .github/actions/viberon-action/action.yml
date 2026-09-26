@@ -1,0 +1,58 @@
+name: 'Viberon Auto-Fix'
+description: 'Automatically fix GitHub issues using Viberon AI'
+author: 'Viberon Team'
+branding:
+  icon: 'zap'
+  color: 'purple'
+
+inputs:
+  issue-number:
+    description: 'GitHub issue number to fix'
+    required: true
+  model:
+    description: 'AI model to use (claude-sonnet-4, claude-opus-4, etc.)'
+    required: false
+    default: 'claude-sonnet-4'
+  max-turns:
+    description: 'Maximum turns for agent'
+    required: false
+    default: '10'
+  timeout:
+    description: 'Timeout in minutes'
+    required: false
+    default: '30'
+  create-pr:
+    description: 'Create pull request automatically'
+    required: false
+    default: 'true'
+  pr-base:
+    description: 'Base branch for PR'
+    required: false
+    default: 'main'
+  github-token:
+    description: 'GitHub token for API calls'
+    required: false
+    default: ${{ github.token }}
+  anthropic-api-key:
+    description: 'Anthropic API key for Claude models'
+    required: false
+
+outputs:
+  status:
+    description: 'Fix status: resolved, failed, incomplete, or error'
+  pr-number:
+    description: 'Created pull request number (if create-pr is true)'
+  pr-url:
+    description: 'Created pull request URL'
+  patch-path:
+    description: 'Path to generated patch file'
+  report-path:
+    description: 'Path to evidence report'
+  tokens-used:
+    description: 'Total tokens used'
+  time-ms:
+    description: 'Time taken in milliseconds'
+
+runs:
+  using: 'node20'
+  main: 'index.js'
