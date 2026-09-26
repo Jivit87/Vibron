@@ -19,7 +19,14 @@ import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import path from "node:path";
 
 import type { McpToolInfo } from "@/lib/mcp/bridge";
-import { configFingerprint, expandTransport, type McpServerConfig } from "@/lib/mcp/config";
+import { getMcpSecrets } from "@/lib/ai/credentials";
+import {
+  configFingerprint,
+  expandSecretRefs,
+  expandTransport,
+  secretRefs,
+  type McpServerConfig,
+} from "@/lib/mcp/config";
 import { scrubEnv } from "@/lib/terminal/safety";
 
 export type McpStatus = "idle" | "connecting" | "connected" | "error" | "closed";
@@ -91,16 +98,34 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Values for the `${secret:NAME}` references in a config. Only the user's
+ * own global list may reference stored secrets: a repo file naming
+ * `${secret:…}` gets nothing (and a log line saying why).
+ */
+async function loadSecrets(config: McpServerConfig, conn: Connection): Promise<Record<string, string>> {
+  const names = secretRefs(config.transport);
+  if (names.length === 0) return {};
+  if (config.source !== "global") {
+    log(conn, "[viberon] ${secret:…} references are only honoured for servers in user settings");
+    return {};
+  }
+  return getMcpSecrets(config.name, names);
+}
+
 function buildTransport(
   config: McpServerConfig,
   cwd: string | null,
   conn: Connection,
+  secrets: Record<string, string> = {},
 ): Transport {
   const missing = new Set<string>();
   // `${VAR}` in a repo-supplied config must not be able to pull the app's
   // API keys into a header or argument bound for a third party.
   const env = config.source === "global" ? process.env : scrubEnv(process.env);
-  const t = expandTransport(config.transport, env, missing);
+  // Environment first, secrets second: a secret value that happens to
+  // contain `${…}` is never itself expanded.
+  const t = expandSecretRefs(expandTransport(config.transport, env, missing), secrets, missing);
   if (missing.size > 0) {
     log(conn, `[viberon] unset environment variables: ${[...missing].join(", ")}`);
   }
@@ -157,7 +182,7 @@ async function connect(
 
   let transport: Transport | undefined;
   try {
-    transport = buildTransport(config, cwd, conn);
+    transport = buildTransport(config, cwd, conn, await loadSecrets(config, conn));
     if (transport instanceof StdioClientTransport) {
       transport.stderr?.on("data", (chunk: Buffer) => log(conn, chunk.toString("utf8")));
     }
@@ -258,6 +283,17 @@ export async function disconnectServer(scope: string, name: string, forget = fal
   await closeConnection(conn);
   conn.status = "idle";
   if (forget) pool.delete(conn.key);
+}
+
+/** Drop every pooled connection to `name`, across all workspace scopes. */
+export async function disconnectEverywhere(name: string): Promise<void> {
+  const matches = [...pool.values()].filter((conn) => conn.name === name);
+  await Promise.all(
+    matches.map(async (conn) => {
+      await closeConnection(conn);
+      conn.status = "idle";
+    }),
+  );
 }
 
 export async function callServerTool(

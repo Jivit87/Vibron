@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { useViberon, type AppSettings } from "@/store/viberon";
 import { cx, Segmented, SettingRow as Row, Switch } from "@/components/vibe/primitives";
 import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
+import { McpMarketplace } from "@/components/vibe/McpMarketplace";
 
 interface ProviderStatus {
   provider: "anthropic" | "groq" | "openai" | "nvidia" | "gemini";
@@ -59,6 +60,7 @@ const CATEGORIES = [
   { id: "providers", label: "Providers" },
   { id: "agents", label: "Agents" },
   { id: "integrations", label: "Integrations" },
+  { id: "marketplace", label: "MCP Marketplace" },
   { id: "permissions", label: "Permissions" },
   { id: "retrieval", label: "Retrieval" },
   { id: "editor", label: "Editor" },
@@ -222,6 +224,14 @@ export function SettingsPage() {
 
             <Section id="integrations" title="Integrations" hint="MCP servers available to every workspace. Tokens stay on this machine.">
               <GithubMcpSettings show={show} />
+            </Section>
+
+            <Section
+              id="marketplace"
+              title="MCP Marketplace"
+              hint="Install well-known MCP servers for every workspace. Secrets go to the local credentials store, never into config."
+            >
+              <McpMarketplace show={show} />
             </Section>
 
             <Section

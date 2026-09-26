@@ -1,0 +1,421 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "description": "Read, write, search and move files inside the directories you allow. Paths are relative to the workspace root.",
+      "category": "files",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "{{ALLOWED_DIR}}"],
+      "fields": [
+        {
+          "name": "ALLOWED_DIR",
+          "label": "Allowed directory",
+          "description": "The only directory the server may touch. \".\" is the open workspace.",
+          "default": ".",
+          "required": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["files", "read", "write"]
+    },
+    {
+      "id": "fetch",
+      "name": "Fetch",
+      "description": "Fetch a URL and convert the page to Markdown for the model, with chunked reading of long pages.",
+      "category": "web",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "tags": ["http", "markdown", "scrape"]
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "description": "Inspect and operate on a Git repository: status, diff, log, show, branch, commit.",
+      "category": "developer",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "{{REPOSITORY}}"],
+      "fields": [
+        {
+          "name": "REPOSITORY",
+          "label": "Repository path",
+          "description": "Path to the repository. \".\" is the open workspace.",
+          "default": ".",
+          "required": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["git", "vcs"]
+    },
+    {
+      "id": "memory",
+      "name": "Memory",
+      "description": "A persistent knowledge graph of entities, relations and observations the agent can read and extend across sessions.",
+      "category": "knowledge",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "fields": [
+        {
+          "name": "MEMORY_FILE_PATH",
+          "label": "Memory file",
+          "description": "Where the graph is stored. Leave empty for the package default.",
+          "placeholder": "/Users/me/.viberon/memory.json"
+        }
+      ],
+      "tags": ["knowledge graph", "persistence"]
+    },
+    {
+      "id": "sequential-thinking",
+      "name": "Sequential Thinking",
+      "description": "A structured scratchpad for step-by-step reasoning that can revise and branch earlier thoughts.",
+      "category": "reasoning",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "tags": ["reasoning", "planning"]
+    },
+    {
+      "id": "time",
+      "name": "Time",
+      "description": "Current time and time-zone conversion using IANA zone names.",
+      "category": "utilities",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-time"],
+      "tags": ["timezone", "clock"]
+    },
+    {
+      "id": "everything",
+      "name": "Everything (test server)",
+      "description": "The MCP reference test server: exercises tools, resources, prompts and sampling. Useful for checking your setup.",
+      "category": "developer",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "tags": ["testing", "reference"]
+    },
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "description": "Read-only SQL queries and schema inspection for a PostgreSQL database. Archived reference server.",
+      "category": "databases",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/postgres",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "{{DATABASE_URL}}"],
+      "fields": [
+        {
+          "name": "DATABASE_URL",
+          "label": "Connection string",
+          "description": "Use a read-only role. The server receives this as a command-line argument.",
+          "placeholder": "postgresql://readonly:password@localhost:5432/app",
+          "secret": true,
+          "required": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["sql", "database"]
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "description": "Query and modify a local SQLite database, with a business-insights memo tool. Archived reference server.",
+      "category": "databases",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/sqlite",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "{{DB_PATH}}"],
+      "fields": [
+        {
+          "name": "DB_PATH",
+          "label": "Database file",
+          "description": "Path to the .db file. Relative paths resolve from the workspace root.",
+          "placeholder": "./data/app.db",
+          "required": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["sql", "database"]
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "description": "Drive a real browser through accessibility snapshots: navigate, click, type, take screenshots.",
+      "category": "browser",
+      "publisher": "Microsoft",
+      "trust": "official",
+      "homepage": "https://github.com/microsoft/playwright-mcp",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "tags": ["browser", "automation", "testing"]
+    },
+    {
+      "id": "brave-search",
+      "name": "Brave Search",
+      "description": "Web, news, image and local search through the Brave Search API.",
+      "category": "search",
+      "publisher": "Brave",
+      "trust": "official",
+      "homepage": "https://github.com/brave/brave-search-mcp-server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
+      "fields": [
+        {
+          "name": "BRAVE_API_KEY",
+          "label": "Brave Search API key",
+          "placeholder": "BSA…",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "tags": ["search", "web"]
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "List channels, read history and threads, post messages and reactions in a Slack workspace. Archived reference server.",
+      "category": "productivity",
+      "publisher": "Model Context Protocol",
+      "trust": "official",
+      "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "fields": [
+        {
+          "name": "SLACK_BOT_TOKEN",
+          "label": "Bot token",
+          "placeholder": "xoxb-…",
+          "secret": true,
+          "required": true
+        },
+        {
+          "name": "SLACK_TEAM_ID",
+          "label": "Team ID",
+          "placeholder": "T01234567",
+          "required": true
+        },
+        {
+          "name": "SLACK_CHANNEL_IDS",
+          "label": "Channel IDs",
+          "description": "Comma-separated. Leave empty for all public channels.",
+          "placeholder": "C01234567,C76543210"
+        }
+      ],
+      "tags": ["chat", "messaging"]
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "description": "Look up Sentry issues, events, stack traces and releases, and search errors across projects.",
+      "category": "observability",
+      "publisher": "Sentry",
+      "trust": "official",
+      "homepage": "https://github.com/getsentry/sentry-mcp",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server@latest"],
+      "fields": [
+        {
+          "name": "SENTRY_ACCESS_TOKEN",
+          "label": "User auth token",
+          "placeholder": "sntryu_…",
+          "secret": true,
+          "required": true
+        },
+        {
+          "name": "SENTRY_HOST",
+          "label": "Self-hosted host",
+          "description": "Only for self-hosted Sentry. Leave empty for sentry.io.",
+          "placeholder": "sentry.example.com"
+        }
+      ],
+      "tags": ["errors", "monitoring"]
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "Linear's hosted MCP server (issues, projects, comments) through the mcp-remote bridge, which signs you in with OAuth in the browser on first use.",
+      "category": "productivity",
+      "publisher": "mcp-remote (community bridge) to Linear",
+      "trust": "community",
+      "homepage": "https://linear.app/docs/mcp",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"],
+      "tags": ["issues", "project management"]
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "description": "Search, read and edit Notion pages and databases through the Notion API.",
+      "category": "productivity",
+      "publisher": "Notion",
+      "trust": "official",
+      "homepage": "https://github.com/makenotion/notion-mcp-server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "fields": [
+        {
+          "name": "NOTION_TOKEN",
+          "label": "Integration token",
+          "description": "An internal integration secret. Share the pages it may access with the integration.",
+          "placeholder": "ntn_…",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "tags": ["docs", "wiki", "notes"]
+    },
+    {
+      "id": "context7",
+      "name": "Context7",
+      "description": "Up-to-date, version-specific library documentation and code examples pulled into the prompt.",
+      "category": "knowledge",
+      "publisher": "Upstash",
+      "trust": "official",
+      "homepage": "https://github.com/upstash/context7",
+      "transport": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "CONTEXT7_API_KEY": "{{CONTEXT7_API_KEY}}" },
+      "fields": [
+        {
+          "name": "CONTEXT7_API_KEY",
+          "label": "API key",
+          "description": "Optional. Raises the rate limit.",
+          "placeholder": "ctx7sk-…",
+          "secret": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["docs", "libraries", "api reference"]
+    },
+    {
+      "id": "aws-documentation",
+      "name": "AWS Documentation",
+      "description": "Search and read AWS documentation pages and get related-content recommendations.",
+      "category": "cloud",
+      "publisher": "AWS Labs",
+      "trust": "official",
+      "homepage": "https://github.com/awslabs/mcp/tree/main/src/aws-documentation-mcp-server",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["awslabs.aws-documentation-mcp-server@latest"],
+      "fields": [
+        {
+          "name": "FASTMCP_LOG_LEVEL",
+          "label": "Log level",
+          "default": "ERROR",
+          "placeholder": "ERROR"
+        }
+      ],
+      "tags": ["aws", "docs", "cloud"]
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "description": "Inspect a Supabase project: tables, SQL, migrations, logs and edge functions. Installed read-only.",
+      "category": "databases",
+      "publisher": "Supabase",
+      "trust": "official",
+      "homepage": "https://github.com/supabase-community/supabase-mcp",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@supabase/mcp-server-supabase@latest", "--read-only", "--project-ref={{PROJECT_REF}}"],
+      "fields": [
+        {
+          "name": "SUPABASE_ACCESS_TOKEN",
+          "label": "Personal access token",
+          "placeholder": "sbp_…",
+          "secret": true,
+          "required": true
+        },
+        {
+          "name": "PROJECT_REF",
+          "label": "Project ref",
+          "description": "Scopes the server to one project.",
+          "placeholder": "abcdefghijklmnopqrst",
+          "required": true,
+          "inject": "template"
+        }
+      ],
+      "tags": ["postgres", "database", "backend"]
+    },
+    {
+      "id": "firecrawl",
+      "name": "Firecrawl",
+      "description": "Scrape, crawl, map and search the web with JavaScript rendering, returning clean Markdown.",
+      "category": "web",
+      "publisher": "Firecrawl",
+      "trust": "official",
+      "homepage": "https://github.com/mendableai/firecrawl-mcp-server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp"],
+      "fields": [
+        {
+          "name": "FIRECRAWL_API_KEY",
+          "label": "API key",
+          "placeholder": "fc-…",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "tags": ["scrape", "crawl"]
+    },
+    {
+      "id": "exa",
+      "name": "Exa Search",
+      "description": "Neural web search, code search and page contents through the Exa API.",
+      "category": "search",
+      "publisher": "Exa",
+      "trust": "official",
+      "homepage": "https://github.com/exa-labs/exa-mcp-server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "fields": [
+        {
+          "name": "EXA_API_KEY",
+          "label": "API key",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "tags": ["search", "research"]
+    }
+  ]
+}

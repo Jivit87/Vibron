@@ -26,6 +26,7 @@ import {
   restartServer,
   serverLogs,
 } from "@/lib/mcp/manager";
+import { uninstallServer } from "@/lib/mcp/marketplace";
 import {
   getGlobalEntries,
   resolveServers,
@@ -166,7 +167,10 @@ export async function POST(request: Request) {
 
   switch (action) {
     case "remove": {
-      if (config.source === "global") {
+      if (config.source === "global" && config.raw.catalogId) {
+        // Marketplace installs own secrets in the credentials store; drop them too.
+        await uninstallServer(name);
+      } else if (config.source === "global") {
         await setGlobalEntry(name, null);
       } else if (config.source === "viberon" && rootPath) {
         await setWorkspaceEntry(rootPath, name, null);
