@@ -1,0 +1,13 @@
+node_modules/
+.next/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+.viberon-dev-store.json
+.env*
+.DS_Store
+.playwright-mcp/
+.claude/worktrees/
+.viberon/
+eval/.cache/
+eval/results/runs/
