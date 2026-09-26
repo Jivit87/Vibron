@@ -1,0 +1,598 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================================
+ * VIBERON TOKENS
+ *
+ * Neutral surfaces, hairline borders, one accent. Colour is reserved for
+ * focus/selection (accent) and for diff/status (green, red, amber). Nothing
+ * in a component should hardcode a hex value; everything reads a token so
+ * the light theme is a token swap, not a second stylesheet.
+ *
+ *   --vb-bg-*     surfaces: void (chrome) → base → surface → raised → overlay
+ *   --vb-line-*   1px borders
+ *   --vb-text-*   type by emphasis
+ *   --vb-hover / --vb-active / --vb-fill   translucent row states
+ *   --vb-accent   focus + selection only
+ *   --vb-add / --vb-del / --vb-amber       diff + status
+ * ========================================================================= */
+
+@theme {
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+@theme inline {
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  /* Every radius utility collapses to 2–4px. No pills. */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 4px;
+}
+
+:root {
+  color-scheme: dark;
+
+  --vb-bg-void: #0f0f10;
+  --vb-bg-base: #151516;
+  --vb-bg-surface: #151516;
+  --vb-bg-raised: #1b1b1d;
+  --vb-bg-overlay: #1d1d1f;
+  --vb-bg-input: #1b1b1d;
+
+  --vb-line-faint: #212123;
+  --vb-line: #262628;
+  --vb-line-strong: #34343a;
+
+  --vb-text-hi: #ececed;
+  --vb-text: #d6d6d6;
+  --vb-text-mid: #a8a8ab;
+  --vb-text-dim: #8b8b8e;
+  --vb-text-faint: #5e5e62;
+
+  --vb-hover: rgba(255, 255, 255, 0.04);
+  --vb-active: rgba(255, 255, 255, 0.07);
+  --vb-fill: rgba(255, 255, 255, 0.05);
+
+  --vb-accent: #6b9eff;
+  --vb-accent-fg: #0f0f10;
+  --vb-accent-soft: rgba(107, 158, 255, 0.13);
+  --vb-accent-line: rgba(107, 158, 255, 0.5);
+
+  --vb-mint: #6cbf84;
+  --vb-rose: #e0736f;
+  --vb-amber: #d4a54a;
+
+  --vb-add: #6cbf84;
+  --vb-add-bg: rgba(108, 191, 132, 0.1);
+  --vb-del: #e0736f;
+  --vb-del-bg: rgba(224, 115, 111, 0.1);
+  --vb-warn-bg: rgba(212, 165, 74, 0.08);
+
+  --vb-shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --vb-scrollbar: rgba(255, 255, 255, 0.1);
+
+  --radius: 4px;
+
+  /* shadcn bridge (sonner) */
+  --background: var(--vb-bg-base);
+  --foreground: var(--vb-text-hi);
+  --popover: var(--vb-bg-overlay);
+  --popover-foreground: var(--vb-text-hi);
+  --primary: var(--vb-accent);
+  --primary-foreground: var(--vb-accent-fg);
+  --muted: var(--vb-fill);
+  --muted-foreground: var(--vb-text-dim);
+  --accent: var(--vb-active);
+  --accent-foreground: var(--vb-text-hi);
+  --destructive: var(--vb-rose);
+  --border: var(--vb-line);
+  --input: var(--vb-line);
+  --ring: var(--vb-accent-line);
+}
+
+/* Light: the same restraint, inverted. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --vb-bg-void: #f4f4f5;
+  --vb-bg-base: #ffffff;
+  --vb-bg-surface: #fbfbfb;
+  --vb-bg-raised: #f2f2f3;
+  --vb-bg-overlay: #ffffff;
+  --vb-bg-input: #ffffff;
+
+  --vb-line-faint: #ececee;
+  --vb-line: #e2e2e5;
+  --vb-line-strong: #cfcfd4;
+
+  --vb-text-hi: #151517;
+  --vb-text: #2c2c30;
+  --vb-text-mid: #505056;
+  --vb-text-dim: #6c6c73;
+  --vb-text-faint: #a0a0a7;
+
+  --vb-hover: rgba(0, 0, 0, 0.035);
+  --vb-active: rgba(0, 0, 0, 0.06);
+  --vb-fill: rgba(0, 0, 0, 0.045);
+
+  --vb-accent: #2f6bd8;
+  --vb-accent-fg: #ffffff;
+  --vb-accent-soft: rgba(47, 107, 216, 0.1);
+  --vb-accent-line: rgba(47, 107, 216, 0.5);
+
+  --vb-mint: #2d8a4e;
+  --vb-rose: #c4413c;
+  --vb-amber: #a26a00;
+
+  --vb-add: #2d8a4e;
+  --vb-add-bg: rgba(45, 138, 78, 0.09);
+  --vb-del: #c4413c;
+  --vb-del-bg: rgba(196, 65, 60, 0.08);
+  --vb-warn-bg: rgba(162, 106, 0, 0.07);
+
+  --vb-shadow-pop: 0 6px 20px rgba(0, 0, 0, 0.12);
+  --vb-scrollbar: rgba(0, 0, 0, 0.15);
+}
+
+@layer base {
+  * {
+    border-color: var(--vb-line);
+  }
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    background: var(--vb-bg-base);
+    color: var(--vb-text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  pre,
+  code,
+  kbd,
+  samp {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+  ::selection {
+    background: var(--vb-accent-soft);
+    color: var(--vb-text-hi);
+  }
+  :focus-visible {
+    outline: 1px solid var(--vb-accent);
+    outline-offset: 1px;
+  }
+  /* lucide default stroke is 2; 1.5 reads closer to native editors. */
+  svg.lucide {
+    stroke-width: 1.5;
+  }
+}
+
+/* ============================================================================
+ * Scrollbars
+ * ========================================================================= */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vb-scrollbar) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vb-scrollbar);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* ============================================================================
+ * Surfaces
+ * ========================================================================= */
+
+/* Popovers and menus: the only elements allowed a shadow. */
+.vb-pop {
+  background: var(--vb-bg-overlay);
+  border: 1px solid var(--vb-line-strong);
+  border-radius: 4px;
+  box-shadow: var(--vb-shadow-pop);
+}
+
+/* A bordered box. Flat: no highlight, no gradient. */
+.vb-box {
+  background: var(--vb-bg-base);
+  border: 1px solid var(--vb-line);
+  border-radius: 4px;
+}
+
+/* Dense list row: 24px, full-width hover. */
+.vb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--vb-text);
+}
+.vb-row:hover {
+  background: var(--vb-hover);
+}
+.vb-row[data-selected="true"] {
+  background: var(--vb-accent-soft);
+  color: var(--vb-text-hi);
+}
+
+/* Section label used in sidebars (VS Code style). */
+.vb-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vb-text-dim);
+}
+
+/* Buttons */
+.vb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid var(--vb-line);
+  font-size: 12px;
+  color: var(--vb-text);
+  background: transparent;
+  white-space: nowrap;
+}
+.vb-btn:hover:not(:disabled) {
+  background: var(--vb-hover);
+}
+.vb-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.vb-btn-primary {
+  background: var(--vb-accent);
+  border-color: var(--vb-accent);
+  color: var(--vb-accent-fg);
+  font-weight: 500;
+}
+.vb-btn-primary:hover:not(:disabled) {
+  background: var(--vb-accent);
+  filter: brightness(1.08);
+}
+.vb-btn-ghost {
+  border-color: transparent;
+  color: var(--vb-text-mid);
+}
+.vb-btn-danger {
+  color: var(--vb-rose);
+}
+
+.vb-input {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid var(--vb-line);
+  background: var(--vb-bg-input);
+  color: var(--vb-text-hi);
+  font-size: 12.5px;
+  outline: none;
+}
+.vb-input.vb-textarea {
+  height: auto;
+  padding: 4px 8px;
+}
+.vb-input:focus {
+  border-color: var(--vb-accent-line);
+}
+.vb-input::placeholder,
+textarea::placeholder {
+  color: var(--vb-text-faint);
+}
+
+/* ============================================================================
+ * Motion — minimal. Spinners and a caret; nothing decorative.
+ * ========================================================================= */
+
+@keyframes vb-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.vb-in {
+  animation: vb-fade 0.12s ease-out both;
+}
+
+@keyframes vb-shimmer {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.vb-shimmer {
+  background: var(--vb-fill);
+  animation: vb-shimmer 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes vb-caret {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  95% {
+    opacity: 0.15;
+  }
+}
+.vb-caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--vb-text-dim);
+  animation: vb-caret 1.1s steps(1) infinite;
+}
+
+@keyframes vb-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+.vb-pulse {
+  animation: vb-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes vb-flash {
+  0%,
+  100% {
+    background: transparent;
+  }
+  25%,
+  60% {
+    background: var(--vb-accent-soft);
+  }
+}
+.vb-flash {
+  animation: vb-flash 1.4s ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ============================================================================
+ * Components
+ * ========================================================================= */
+
+/* Role label: plain mono text, no colour coding. */
+.vb-role {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--vb-text-dim);
+  white-space: nowrap;
+}
+
+.vb-term {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 2;
+}
+.vb-term-stderr {
+  color: var(--vb-rose);
+}
+.vb-term-system {
+  color: var(--vb-text-dim);
+}
+
+/* Assistant markdown. Scoped so it cannot leak into the editor. */
+.vb-prose {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--vb-text);
+}
+.vb-prose > * + * {
+  margin-top: 0.65em;
+}
+.vb-prose h1,
+.vb-prose h2,
+.vb-prose h3,
+.vb-prose h4 {
+  color: var(--vb-text-hi);
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 1.2em;
+}
+.vb-prose h1 { font-size: 1.2em; }
+.vb-prose h2 { font-size: 1.1em; }
+.vb-prose h3 { font-size: 1em; }
+.vb-prose h4 { font-size: 0.95em; }
+.vb-prose strong {
+  color: var(--vb-text-hi);
+  font-weight: 600;
+}
+.vb-prose a {
+  color: var(--vb-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.vb-prose ul,
+.vb-prose ol {
+  padding-left: 1.3em;
+}
+.vb-prose ul { list-style: disc; }
+.vb-prose ol { list-style: decimal; }
+.vb-prose li::marker {
+  color: var(--vb-text-faint);
+}
+.vb-prose li + li {
+  margin-top: 0.25em;
+}
+.vb-prose code {
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  background: var(--vb-fill);
+  color: var(--vb-text-hi);
+}
+.vb-prose pre {
+  background: var(--vb-bg-void);
+  border: 1px solid var(--vb-line);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.vb-prose pre code {
+  background: none;
+  padding: 0;
+  color: var(--vb-text);
+  font-size: inherit;
+}
+.vb-prose blockquote {
+  border-left: 2px solid var(--vb-line-strong);
+  padding-left: 12px;
+  color: var(--vb-text-mid);
+}
+.vb-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  display: block;
+  overflow-x: auto;
+}
+.vb-prose th,
+.vb-prose td {
+  border: 1px solid var(--vb-line);
+  padding: 4px 8px;
+  text-align: left;
+}
+.vb-prose th {
+  background: var(--vb-fill);
+  color: var(--vb-text-hi);
+  font-weight: 600;
+}
+.vb-prose hr {
+  border: 0;
+  border-top: 1px solid var(--vb-line);
+}
+
+/* ============================================================================
+ * Monaco decorations. Referenced by string from deltaDecorations.
+ * ========================================================================= */
+.viberon-selected-line {
+  background: var(--vb-accent-soft);
+  border-left: 2px solid var(--vb-accent);
+}
+.viberon-selected-gutter {
+  background: var(--vb-accent);
+  width: 2px !important;
+  margin-left: 3px;
+}
+.viberon-retrieved-line {
+  background: var(--vb-add-bg);
+}
+.viberon-retrieved-gutter {
+  background: var(--vb-add);
+  width: 2px !important;
+  margin-left: 3px;
+}
+.viberon-agent-line {
+  background: var(--vb-warn-bg);
+}
+.viberon-glyph-in,
+.viberon-glyph-out,
+.viberon-glyph-both {
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50%;
+  margin-top: 7px;
+  margin-left: 5px;
+}
+.viberon-glyph-in {
+  background: var(--vb-text-dim);
+}
+.viberon-glyph-out {
+  border: 1px solid var(--vb-text-dim);
+}
+.viberon-glyph-both {
+  background: var(--vb-accent);
+}
+
+/* Review findings on the modified side of a diff. */
+.viberon-finding-line-high {
+  background: var(--vb-del-bg);
+}
+.viberon-finding-line-medium {
+  background: var(--vb-warn-bg);
+}
+.viberon-finding-line-low {
+  background: var(--vb-fill);
+}
+.viberon-finding-glyph {
+  width: 2px !important;
+  margin-left: 5px;
+}
+.viberon-finding-glyph-high {
+  background: var(--vb-rose);
+}
+.viberon-finding-glyph-medium {
+  background: var(--vb-amber);
+}
+.viberon-finding-glyph-low {
+  background: var(--vb-text-dim);
+}
+
+.monaco-editor .scroll-decoration {
+  box-shadow: none !important;
+}
