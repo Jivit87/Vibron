@@ -298,6 +298,24 @@ rustup component add rust-analyzer
 collected and shown to the agent. No configuration needed—if a language server
 is installed, Viberon uses it.
 
+### Web Browsing
+
+Agents can browse documentation, API references, and technical resources on the web:
+
+```typescript
+// Agent can use these tools:
+web_search("React useEffect cleanup")  // Search and get URLs
+browse("https://react.dev/reference/react/useEffect")  // Read full page
+```
+
+**Supported domains:**
+- Documentation (MDN, React, Python, Go, Rust, TypeScript, etc.)
+- Package registries (npm, PyPI, crates.io, etc.)
+- Q&A sites (Stack Overflow, GitHub)
+- Tutorials (CSS-Tricks, web.dev, Medium, dev.to)
+
+**Security:** Browsing respects command policy (ask/auto/never) and uses domain allowlisting in restricted mode.
+
 ---
 
 ## Keyboard

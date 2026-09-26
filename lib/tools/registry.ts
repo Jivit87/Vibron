@@ -26,6 +26,7 @@ import type { ProjectMemory } from "@/lib/memory/types";
 import { classifyCommand } from "@/lib/terminal";
 import { trimHeadTail } from "@/lib/terminal/output";
 import * as verify from "@/lib/verify";
+import { browseUrl, searchWeb, BROWSE_TOOL_DEF, WEB_SEARCH_TOOL_DEF } from "@/lib/browse";
 import {
   applyStyle,
   checkEdit,
@@ -937,6 +938,7 @@ const runCommandTool: ToolImpl = {
         signal: ctx.signal,
         runId: ctx.runId,
         origin: "agent",
+        repoEnv: true,
         sandbox: ctx.sandbox,
       });
       // Give a server a moment to bind and print its URL.
@@ -961,6 +963,7 @@ const runCommandTool: ToolImpl = {
       signal: ctx.signal,
       runId: ctx.runId,
       origin: "agent",
+      repoEnv: true,
       // Collect generously; `condense` below decides what the model sees.
       maxOutputChars: 200_000,
       sandbox: ctx.sandbox,
@@ -1194,6 +1197,93 @@ const todoWriteTool: ToolImpl = {
   },
 };
 
+/* ---------------------------- browse tools ------------------------------- */
+
+const browseTool: ToolImpl = {
+  def: BROWSE_TOOL_DEF,
+  async run(args, ctx) {
+    const url = str(args.url).trim();
+    if (!url) return "Error: `url` is required.";
+    
+    // Validate URL
+    try {
+      new URL(url);
+    } catch {
+      return `Error: Invalid URL "${url}". Must start with http:// or https://`;
+    }
+    
+    // Check if browsing is allowed
+    if (ctx.commandPolicy === "never") {
+      return "Refused: web browsing is disabled in Settings.";
+    }
+    
+    // Request approval if needed
+    if (ctx.commandPolicy === "ask") {
+      const approved = await ctx.events.requestApproval?.({
+        kind: "command",
+        title: `Browse ${url}`,
+        reason: "web browsing requires permission",
+        detail: { args: url },
+        alwaysKey: `browse:${new URL(url).hostname}`,
+      });
+      if (!approved) {
+        return `The user declined to browse ${url}. Continue without it, or explain why it is necessary.`;
+      }
+    }
+    
+    // Use DEV_DOMAINS as allowlist in restricted mode
+    const allowedDomains = ctx.commandPolicy === "auto" ? null : undefined;
+    
+    const result = await browseUrl(url, {
+      maxChars: 16_000,
+      timeoutMs: 15_000,
+      mainContentOnly: true,
+      allowedDomains,
+    });
+    
+    if (result.error) {
+      return `Error browsing ${url}: ${result.error}`;
+    }
+    
+    const truncatedNote = result.truncated ? "\n[Content truncated to fit context]" : "";
+    return `# ${result.title}\n\nURL: ${result.url}\nStatus: ${result.status}\n\n${result.content}${truncatedNote}`;
+  },
+};
+
+const webSearchTool: ToolImpl = {
+  def: WEB_SEARCH_TOOL_DEF,
+  async run(args, ctx) {
+    const query = str(args.query).trim();
+    if (!query) return "Error: `query` is required.";
+    
+    // Check if browsing is allowed
+    if (ctx.commandPolicy === "never") {
+      return "Refused: web search is disabled in Settings.";
+    }
+    
+    // Request approval if needed (less strict than browse)
+    if (ctx.commandPolicy === "ask") {
+      const approved = await ctx.events.requestApproval?.({
+        kind: "command",
+        title: `Search web for "${query}"`,
+        reason: "web search requires permission",
+        detail: { args: query },
+        alwaysKey: "web_search:allow",
+      });
+      if (!approved) {
+        return `The user declined web search. Continue without it, or explain why it is necessary.`;
+      }
+    }
+    
+    const result = await searchWeb(query, {
+      maxResults: 5,
+      timeoutMs: 10_000,
+    });
+    
+    return result;
+  },
+};
+
 /* ---------------------------- role bundles -------------------------------- */
 
 export const ALL_TOOLS: Record<string, ToolImpl> = {
@@ -1222,6 +1312,8 @@ export const ALL_TOOLS: Record<string, ToolImpl> = {
   create_file: createFileTool,
   compare: compareTool,
   finish: finishTool,
+  browse: browseTool,
+  web_search: webSearchTool,
 };
 
 /**
@@ -1248,6 +1340,8 @@ export const READ_TOOLS = [
   "list_files",
   "read_file",
   "workspace_stats",
+  "browse",
+  "web_search",
 ];
 
 export const WRITE_TOOLS = [
