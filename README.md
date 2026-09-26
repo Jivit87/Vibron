@@ -244,6 +244,36 @@ shell, and privilege escalation.
 Every run is snapshotted beforehand, so a run that goes wrong is one click to
 undo — per file, or the whole thing.
 
+### Docker Sandbox (Optional)
+
+For untrusted repositories, Viberon can execute commands in isolated Docker
+containers with resource limits and network restrictions:
+
+```typescript
+// Programmatic
+const result = await solveTask({
+  // ... other options
+  sandbox: {
+    enabled: true,
+    memoryMb: 4096,
+    cpus: 2,
+    network: "restricted"  // Allows npm/pip/cargo registries
+  }
+});
+```
+
+**Security features:**
+- Read-only root filesystem (writable workspace only)
+- Network isolation by default (configurable)
+- CPU, memory, and process limits
+- Automatic container cleanup
+
+**Graceful fallback:** If Docker is not available, commands run directly with a
+warning — no errors, no disruption.
+
+See [docs/SANDBOX.md](docs/SANDBOX.md) for configuration, troubleshooting, and
+security details.
+
 ---
 
 ## Keyboard
