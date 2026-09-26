@@ -36,6 +36,7 @@ import { indexWorkspaceFiles } from "@/lib/workspace/graph-index";
 import { countTokens } from "@/lib/tokens";
 import { deriveMemory, importLegacyEntries, loadMemory, saveMemory } from "@/lib/memory";
 import type { ProjectMemory } from "@/lib/memory/types";
+import { LspManager } from "@/lib/lsp";
 
 export interface WorkspaceHandle {
   repoKey: string;
@@ -43,6 +44,8 @@ export interface WorkspaceHandle {
   rootPath: string | null;
   repoRef: string;
   label: string;
+  /** LSP manager for real-time compiler diagnostics (if workspace has rootPath). */
+  lsp?: LspManager;
 }
 
 export async function openWorkspace(repoKey: string): Promise<WorkspaceHandle> {
@@ -53,6 +56,7 @@ export async function openWorkspace(repoKey: string): Promise<WorkspaceHandle> {
       rootPath: meta.rootPath,
       repoRef: meta.repoRef,
       label: meta.label,
+      lsp: meta.rootPath ? new LspManager(meta.rootPath) : undefined,
     };
   }
   const graph = await getGraph(repoKey);
@@ -61,7 +65,18 @@ export async function openWorkspace(repoKey: string): Promise<WorkspaceHandle> {
     rootPath: null,
     repoRef: graph?.meta.repoRef ?? `store/${repoKey}`,
     label: graph?.meta.repoRef?.split("/")[1]?.split("@")[0] ?? "Workspace",
+    lsp: undefined,
   };
+}
+
+/**
+ * Clean up workspace resources (LSP servers, etc.).
+ * Call this when done with a workspace to prevent resource leaks.
+ */
+export async function closeWorkspace(handle: WorkspaceHandle): Promise<void> {
+  if (handle.lsp) {
+    await handle.lsp.shutdown();
+  }
 }
 
 /* ------------------------------ reads ------------------------------------ */

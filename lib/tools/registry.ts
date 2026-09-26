@@ -431,7 +431,18 @@ async function writeWhole(ctx: ToolContext, path: string, content: string, summa
   });
   const err = await syntaxError(path, content).catch(() => null);
   const warn = err ? `\nWARNING: the file has a syntax problem:\n${err}` : "";
-  return `${result.created ? "Created" : "Updated"} ${path} (${content.split("\n").length} lines). ${summary}${warn}`;
+  
+  // Get LSP diagnostics if available
+  let lspDiagnostics = "";
+  if (ctx.handle.lsp) {
+    try {
+      lspDiagnostics = await ctx.handle.lsp.getDiagnosticsAfterEdit(path, after);
+    } catch {
+      // LSP may fail; don't block the edit
+    }
+  }
+  
+  return `${result.created ? "Created" : "Updated"} ${path} (${content.split("\n").length} lines). ${summary}${warn}${lspDiagnostics}`;
 }
 
 const createFileTool: ToolImpl = {
