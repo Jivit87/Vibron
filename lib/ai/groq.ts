@@ -87,7 +87,7 @@ export const groqProvider: AiProvider = {
 
     const stream = await groq.chat.completions.create(
       {
-        model: request.model,
+        model: request.model.replace(/^groq:/, ""),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         messages: toOpenAiMessages(request) as any,
         max_tokens: maxTokens,

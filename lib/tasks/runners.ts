@@ -58,6 +58,8 @@ async function fixIn(
   const handle = await openWorkspace(task.repoKey);
   const { solveTask } = await import("@/lib/harness/solve");
   const model = await resolveModel(task.model ?? "auto", { agenticOnly: true });
+  const { ensureRepoVenv } = await import("@/lib/verify/env");
+  await ensureRepoVenv(root).catch(() => null);
   const commands = await detectVerifyCommands(root).catch(() => []);
   const result = await solveTask({
     handle,

@@ -41,11 +41,11 @@ export function TasksPanel() {
     const result = await listTasks(repoKey);
     setLoading(false);
     if (result.ok) {
-      setTasks(result.tasks);
+      setTasks(result.tasks ?? null);
       setError(null);
       setMissing(false);
     } else {
-      setError(result.error);
+      setError(result.error ?? null);
       setMissing(Boolean(result.missing));
     }
   }, [repoKey]);

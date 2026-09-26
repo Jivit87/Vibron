@@ -6,7 +6,7 @@
  * (except in the integration tests that require Docker).
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
 // We test the pure logic by importing the module's internals.
 // The actual Docker execution is tested in integration tests.

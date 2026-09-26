@@ -40,5 +40,5 @@ export function getFirestoreDb(): Firestore | null {
     cached = null;
   }
 
-  return cached;
+  return cached ?? null;
 }

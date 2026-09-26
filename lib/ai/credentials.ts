@@ -45,7 +45,10 @@ function genericEnvKey(provider: ProviderId): string | null {
 }
 
 function envKey(provider: ProviderId): string | null {
-  const direct = process.env[ENV_VAR[provider]]?.trim();
+  let direct = process.env[ENV_VAR[provider]]?.trim();
+  if (!direct && provider === "openai") {
+    direct = process.env.OPENROUTER_API_KEY?.trim() || process.env.DEEPSEEK_API_KEY?.trim();
+  }
   return direct || genericEnvKey(provider);
 }
 

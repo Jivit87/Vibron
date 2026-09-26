@@ -189,7 +189,7 @@ function test(name: string, fn: () => Promise<void> | void, skipIf = false) {
       // Wait for cleanup
       await new Promise(resolve => setTimeout(resolve, 500));
       
-      if (session.status !== "killed") {
+      if ((session.status as string) !== "killed") {
         throw new Error(`Expected killed status, got ${session.status}`);
       }
       

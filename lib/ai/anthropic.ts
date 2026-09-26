@@ -230,7 +230,7 @@ export const anthropicProvider: AiProvider = {
 
     const stream = anthropic.messages.stream(
       {
-        model: request.model,
+        model: request.model.replace(/^anthropic:/, ""),
         max_tokens: maxTokens,
         system: buildSystem(request),
         messages: spec?.supportsCaching === false

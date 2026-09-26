@@ -206,6 +206,7 @@ function terminalRunner(repoKey: string, runId?: string): CheckRunner {
       timeoutMs,
       signal,
       runId,
+      repoEnv: true,
       env: { PYTHONDONTWRITEBYTECODE: "1", CI: "1", ...env },
       maxOutputChars: 200_000,
     });

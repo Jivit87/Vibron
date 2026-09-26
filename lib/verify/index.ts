@@ -16,5 +16,5 @@ export { detectVerifyCommands, listRepoPaths, pytestAvailable, TEST_FILE_RE } fr
 export { execInRepo, runVerification, targetCommand, type ExecResult, type ShellRunner } from "@/lib/verify/run";
 export { condenseOutput, extractFailures } from "@/lib/verify/extract";
 export { relatedTestFiles } from "@/lib/verify/related";
-export { buildRepoEnv, findRepoVenv, repoEnvPrelude, repoPathPrefix, which } from "@/lib/verify/env";
+export { buildRepoEnv, ensureRepoVenv, findRepoVenv, repoEnvPrelude, repoPathPrefix, which } from "@/lib/verify/env";
 export { cleanOutput, parseTestOutput, type ParsedTests } from "@/lib/verify/parse";

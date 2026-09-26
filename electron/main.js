@@ -13,10 +13,12 @@ let nextServerPromise;
 const isDev = !app.isPackaged;
 app.setName('Viberon');
 
-// Only use no-sandbox for compatibility; do NOT disable both GPU and
-// software rasterizer at the same time — that leaves Chromium with no
-// rendering backend and produces a blank window.
-app.commandLine.appendSwitch('no-sandbox');
+// Bug fix (Critical #1): Only disable the sandbox when explicitly requested
+// for debugging. Leaving no-sandbox unconditionally enabled allows a
+// compromised renderer to escape Chromium's process isolation.
+if (process.env.DEBUG_NO_SANDBOX === 'true') {
+  app.commandLine.appendSwitch('no-sandbox');
+}
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -71,9 +73,7 @@ function createWindow() {
       mainWindow = null;
     }
     if (nextProcess && BrowserWindow.getAllWindows().length === 0) {
-      nextProcess.kill();
-      nextProcess = null;
-      nextServerUrl = null;
+      killNextProcess();
     }
   });
 }
@@ -157,16 +157,62 @@ async function startNextServerOnce() {
       ELECTRON_RUN_AS_NODE: '1',
       VIBERON_STORE_DIR: userDataDir
     },
-    stdio: 'inherit'
+    stdio: 'inherit',
+    detached: false  // Ensure child is tied to parent process lifetime
   });
 
+  // Bug fix (Critical #2): Surface server startup errors rather than silently leaking
   nextProcess.on('error', (err) => {
     console.error('Failed to start Next.js server:', err);
+    nextProcess = null;
+    nextServerUrl = null;
   });
 
-  await waitForServer(serverUrl);
+  nextProcess.on('exit', (code, signal) => {
+    console.log(`Next.js server exited: code=${code}, signal=${signal}`);
+    if (nextProcess) {
+      nextProcess = null;
+      nextServerUrl = null;
+    }
+  });
+
+  // Bug fix (Critical #2): Apply a 30-second startup timeout so we don't hang
+  // forever if the Next.js server fails to bind.
+  try {
+    await Promise.race([
+      waitForServer(serverUrl),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Next.js server startup timed out after 30s')), 30_000)
+      )
+    ]);
+  } catch (err) {
+    killNextProcess();
+    throw err;
+  }
+
   nextServerUrl = serverUrl;
   return serverUrl;
+}
+
+/**
+ * Gracefully terminate the Next.js child process.
+ * Sends SIGTERM first; if the process has not exited after 5 s, sends SIGKILL.
+ */
+function killNextProcess() {
+  if (!nextProcess) return;
+  const proc = nextProcess;
+  nextProcess = null;
+  nextServerUrl = null;
+
+  proc.kill('SIGTERM');
+
+  const forceKill = setTimeout(() => {
+    if (!proc.killed) {
+      proc.kill('SIGKILL');
+    }
+  }, 5_000);
+
+  proc.once('exit', () => clearTimeout(forceKill));
 }
 
 ipcMain.handle('viberon:open-folder', async () => {
@@ -186,7 +232,21 @@ ipcMain.handle('viberon:new-window', async () => {
 });
 
 ipcMain.handle('viberon:open-terminal', async (_event, cwd) => {
-  const workingDirectory = typeof cwd === 'string' && cwd.length > 0 ? cwd : app.getPath('home');
+  // Bug fix (Critical #3): Validate the renderer-supplied cwd so a compromised
+  // renderer cannot open a terminal in an arbitrary (e.g. system) directory.
+  const homeDir = app.getPath('home');
+  let workingDirectory = homeDir;
+
+  if (typeof cwd === 'string' && cwd.length > 0) {
+    const normalized = path.normalize(path.resolve(cwd));
+    // Only allow directories that are within the user's home directory.
+    if (normalized === homeDir || normalized.startsWith(`${homeDir}${path.sep}`)) {
+      workingDirectory = normalized;
+    } else {
+      console.warn(`[viberon:open-terminal] Rejected path outside home dir: ${normalized}`);
+    }
+  }
+
   try {
     if (process.platform === 'darwin') {
       spawn('open', ['-a', 'Terminal', workingDirectory], {
@@ -217,11 +277,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
-  if (nextProcess) {
-    nextProcess.kill();
-    nextProcess = null;
-    nextServerUrl = null;
-  }
+  killNextProcess();
 });
 
 app.on('activate', () => {
@@ -231,9 +287,5 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
-  if (nextProcess) {
-    nextProcess.kill();
-    nextProcess = null;
-    nextServerUrl = null;
-  }
+  killNextProcess();
 });

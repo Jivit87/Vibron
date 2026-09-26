@@ -48,6 +48,7 @@ describe("lsp module", () => {
       const relPath = "src/main.ts";
 
       // Configure a synthetic typescript server config
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (manager as any).availableServers = [
         {
           language: "typescript",
@@ -76,6 +77,7 @@ describe("lsp module", () => {
         },
       ];
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (manager as any).connections.set("typescript", {
         config: {
           language: "typescript",

@@ -345,7 +345,7 @@ function startCommandDirect(
     markDone();
   });
 
-  setupCleanups(session, options, markDone);
+  setupCleanups(session, options);
   return session;
 }
 
@@ -448,7 +448,7 @@ function startCommandInSandbox(
         markDone();
       });
 
-      setupCleanups(session, options, markDone);
+      setupCleanups(session, options);
     } catch (error) {
       session.status = "failed";
       session.endedAt = Date.now();
@@ -471,7 +471,6 @@ function startCommandInSandbox(
 function setupCleanups(
   session: TerminalSession,
   options: RunOptions,
-  _markDone: () => void,
 ): void {
   const cleanups: (() => void)[] = [];
   if (options.timeoutMs && options.timeoutMs > 0) {

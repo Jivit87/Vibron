@@ -75,7 +75,7 @@ export function MemoryPanel() {
       if (!response.ok) return;
       const body = (await response.json()) as { memory: never };
       setMemory(body.memory);
-      const index = readMemoryIndex(body, { graph: useViberon.getState().graph, rootPath });
+      const index = readMemoryIndex(body, { graph: useViberon.getState().graph ?? null, rootPath });
       setAnchored(index.entries);
       setVault(index.vault);
     } finally {
@@ -133,7 +133,7 @@ export function MemoryPanel() {
   const doneTasks = memory.tasks.filter((t) => t.status === "done");
   const openSuggestions = memory.suggestions.filter((s) => !s.resolved);
   const selectedFile = activeTabPath && !activeTabPath.startsWith("__") ? activeTabPath : null;
-  const backlinks = backlinksFor(anchored, { file: selectedFile, symbolId: selectedNodeId }, graph);
+  const backlinks = backlinksFor(anchored, { file: selectedFile, symbolId: selectedNodeId }, graph ?? null);
   const selectedSymbol = selectedNodeId ? graph?.nodes.find((n) => n.id === selectedNodeId) : undefined;
   const selectionLabel = selectedSymbol?.name ?? selectedFile?.split("/").pop();
 

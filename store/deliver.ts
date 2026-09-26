@@ -146,7 +146,7 @@ export const useDeliver = create<DeliverStore>((set, get) => {
           error: null,
           confirmFiles: [],
           branch: result.branch || d.branch,
-          pr: { url: result.prUrl, number: result.prNumber, branch: result.branch || d.branch, commit: result.commit, updated: result.updated },
+          pr: { url: result.prUrl ?? "", number: result.prNumber, branch: result.branch || d.branch, commit: result.commit, updated: Boolean(result.updated) },
         });
         void get().pollCi(runId);
         return;
@@ -173,7 +173,7 @@ export const useDeliver = create<DeliverStore>((set, get) => {
       if (!d?.pr || d.ciLoading) return;
       patch(runId, { ciLoading: true });
       const result = await fetchCi(d.pr.url);
-      if (result.ok) {
+      if (result.ok && result.ci) {
         patch(runId, {
           ciLoading: false,
           ci: result.ci,
@@ -183,7 +183,7 @@ export const useDeliver = create<DeliverStore>((set, get) => {
           rerunLimit: result.ci.rerunLimit ?? cur(runId)?.rerunLimit,
         });
       } else {
-        patch(runId, { ciLoading: false, ciError: result.error, ciCheckedAt: Date.now() });
+        patch(runId, { ciLoading: false, ciError: result.error ?? null, ciCheckedAt: Date.now() });
       }
     },
 

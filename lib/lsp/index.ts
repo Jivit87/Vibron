@@ -36,7 +36,6 @@
 
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 
 /* -------------------------------- types ---------------------------------- */
 

@@ -10,6 +10,7 @@ import {
   rightOf,
   tabDescriptions,
   type TabLike,
+  type TabsState,
 } from "@/lib/editor/tabs";
 import { pendingReviews, pathsToRestore, reviewKey, type ChangeLike } from "@/lib/editor/review";
 
@@ -31,7 +32,7 @@ describe("tabs", () => {
   });
 
   it("keeps a dirty preview tab and pins on explicit open", () => {
-    let s = { tabs: [tab("a"), tab("p", { preview: true, dirty: true })], activeTabPath: "p" };
+    let s: TabsState<TabLike> = { tabs: [tab("a"), tab("p", { preview: true, dirty: true })], activeTabPath: "p" };
     s = openTabState(s, tab("q"), { preview: true });
     expect(s.tabs.map((t) => t.path)).toEqual(["a", "p", "q"]);
     s = openTabState(s, tab("q"));

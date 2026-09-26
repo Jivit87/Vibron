@@ -211,25 +211,59 @@ async function endpoint(model: string): Promise<Endpoint> {
     };
   }
   const cfg = resolveOpenAiCompatEnv();
-  const key = (await getApiKey("openai")) ?? cfg.apiKey;
-  const local = /localhost|127\.0\.0\.1/.test(cfg.baseUrl);
-  if (!key && !local && cfg.provider !== "ollama") throw new MissingCredentialError("openai");
-  const wireModel = model.startsWith("openai:") ? model.slice("openai:".length) : model;
+  let baseUrl = cfg.baseUrl;
+  let wireModel = model;
+  let provider = cfg.provider;
+  let key = (await getApiKey("openai")) ?? cfg.apiKey;
+
+  if (model.startsWith("openrouter:")) {
+    wireModel = model.slice("openrouter:".length);
+    if (!process.env.AI_BASE_URL && !process.env.VIBERON_OPENAI_BASE_URL) {
+      baseUrl = "https://openrouter.ai/api/v1";
+    }
+    provider = "openrouter";
+    key = process.env.OPENROUTER_API_KEY?.trim() || key;
+  } else if (model.startsWith("ollama:")) {
+    wireModel = model.slice("ollama:".length);
+    if (!process.env.AI_BASE_URL && !process.env.VIBERON_OPENAI_BASE_URL) {
+      baseUrl = (process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1").replace(/\/+$/, "");
+    }
+    provider = "ollama";
+  } else if (model.startsWith("vllm:")) {
+    wireModel = model.slice("vllm:".length);
+    if (!process.env.AI_BASE_URL && !process.env.VIBERON_OPENAI_BASE_URL) {
+      baseUrl = (process.env.VLLM_BASE_URL || "http://localhost:8000/v1").replace(/\/+$/, "");
+    }
+    provider = "openai-compatible";
+  } else if (model.startsWith("deepseek:")) {
+    wireModel = model.slice("deepseek:".length);
+    if (!process.env.AI_BASE_URL && !process.env.VIBERON_OPENAI_BASE_URL) {
+      baseUrl = "https://api.deepseek.com/v1";
+    }
+    provider = "deepseek";
+    key = process.env.DEEPSEEK_API_KEY?.trim() || key;
+  } else if (model.startsWith("openai:")) {
+    wireModel = model.slice("openai:".length);
+  }
+
+  const local = /localhost|127\.0\.0\.1/.test(baseUrl);
+  if (!key && !local && provider !== "ollama") throw new MissingCredentialError("openai");
+
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (key) {
     if (cfg.azure) headers["api-key"] = key;
     else headers.Authorization = `Bearer ${key}`;
   }
-  if (cfg.provider === "openrouter") {
+  if (provider === "openrouter") {
     headers["HTTP-Referer"] = "https://github.com/viberon";
     headers["X-Title"] = "Viberon";
   }
-  let url = `${cfg.baseUrl}/chat/completions`;
-  if (cfg.azure && !cfg.baseUrl.includes("/deployments/")) {
-    url = `${cfg.baseUrl}/openai/deployments/${wireModel}/chat/completions`;
+  let url = `${baseUrl}/chat/completions`;
+  if (cfg.azure && !baseUrl.includes("/deployments/")) {
+    url = `${baseUrl}/openai/deployments/${wireModel}/chat/completions`;
   }
   if (cfg.apiVersion) url += `${url.includes("?") ? "&" : "?"}api-version=${cfg.apiVersion}`;
-  return { url, headers, provider: cfg.provider, wireModel };
+  return { url, headers, provider, wireModel };
 }
 
 function buildPayload(

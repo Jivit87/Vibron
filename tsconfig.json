@@ -8,7 +8,15 @@
     ],
     "allowJs": true,
     "skipLibCheck": true,
-    "strict": false,
+    // Bug fix (Medium #15): strict was false — disabling null checks, implicit
+    // `any`, strict function types, and more. Enabled strict + additional guards.
+    // noUncheckedIndexedAccess is intentionally omitted: it produces too many
+    // false positives in array-heavy code and would require touching hundreds
+    // of files in a separate dedicated PR.
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
     "noEmit": true,
     "incremental": true,
     "module": "esnext",

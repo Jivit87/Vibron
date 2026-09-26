@@ -6,13 +6,14 @@
  * to repo code.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { scrubEnv } from "@/lib/terminal/safety";
 
-const VENV_NAMES = [".venv", "venv", "env", ".env"];
+const VENV_NAMES = [".venv", "venv", "env", ".env", path.join(".viberon", "venv")];
 
 export function findRepoVenv(root: string): string | null {
   for (const name of VENV_NAMES) {
@@ -25,6 +26,57 @@ export function findRepoVenv(root: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Automatically provisions an isolated venv in `.viberon/venv` if none exists
+ * and the repository provides python dependency descriptors (requirements.txt / pyproject.toml).
+ */
+export async function ensureRepoVenv(
+  root: string,
+  opts?: { timeoutMs?: number },
+): Promise<string | null> {
+  const existing = findRepoVenv(root);
+  if (existing) return existing;
+
+  const hasReqs = existsSync(path.join(root, "requirements.txt"));
+  const hasPyproject = existsSync(path.join(root, "pyproject.toml"));
+  const hasSetup = existsSync(path.join(root, "setup.py"));
+
+  if (!hasReqs && !hasPyproject && !hasSetup) return null;
+
+  const env = buildRepoEnv(root);
+  const sysPython = which("python3", env.PATH) ?? which("python", env.PATH);
+  if (!sysPython) return null;
+
+  const targetVenv = path.join(root, ".viberon", "venv");
+  try {
+    mkdirSync(path.join(root, ".viberon"), { recursive: true });
+    const create = spawnSync(sysPython, ["-m", "venv", targetVenv], {
+      cwd: root,
+      timeout: opts?.timeoutMs ?? 60_000,
+      stdio: "ignore",
+    });
+    if (create.status !== 0) return null;
+
+    const venvPip = path.join(
+      targetVenv,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "pip.exe" : "pip",
+    );
+
+    if (existsSync(venvPip) && hasReqs) {
+      spawnSync(venvPip, ["install", "--no-input", "--disable-pip-version-check", "-r", "requirements.txt"], {
+        cwd: root,
+        timeout: opts?.timeoutMs ?? 180_000,
+        stdio: "ignore",
+      });
+    }
+
+    return targetVenv;
+  } catch {
+    return null;
+  }
 }
 
 /** First match for `name` on a PATH string, or null. */

@@ -266,6 +266,8 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
         { command: options.testCmd, framework: "custom", kind: "test", source: "--test-cmd" },
       ];
     } else if (!options.noGate) {
+      const { ensureRepoVenv } = await import("@/lib/verify/env");
+      await ensureRepoVenv(workRoot).catch(() => null);
       verifyCommands = await detectVerifyCommands(workRoot);
     }
     log(

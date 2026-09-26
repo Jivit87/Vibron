@@ -192,13 +192,13 @@ export function BubbleGraph() {
   useEffect(() => {
     if (layer !== "memory" || !repoKey) return;
     let live = true;
-    void fetchMemoryGraph(repoKey, graph, rootPath)
+    void fetchMemoryGraph(repoKey, graph ?? null, rootPath)
       .then((g) => live && setMemGraph(g))
       .catch(() => live && setMemGraph({ nodes: [], links: [] }));
     void fetch(`/api/memory?repoKey=${encodeURIComponent(repoKey)}`)
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null)
-      .then((body) => live && setMemEntries(readMemoryIndex(body, { graph, rootPath }).entries));
+      .then((body) => live && setMemEntries(readMemoryIndex(body, { graph: graph ?? null, rootPath }).entries));
     return () => {
       live = false;
     };

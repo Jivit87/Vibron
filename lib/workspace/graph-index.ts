@@ -40,6 +40,30 @@ export interface IndexStats {
 const memoryIndexes = ((globalThis as { __viberonGraphIndexes?: Map<string, GraphIndexDoc> })
   .__viberonGraphIndexes ??= new Map<string, GraphIndexDoc>());
 
+/**
+ * Bug fix (High #5 — Graph Race Condition):
+ * Per-workspace serialisation lock.  `patchIndexedFile` and
+ * `indexWorkspaceFiles` both follow a read→modify→write pattern on the same
+ * `graph.json` file.  Without a lock, two concurrent edits (e.g. two
+ * agents writing different files at the same millisecond) both read the
+ * same stale snapshot, update independent keys, and the second flush
+ * silently overwrites the first's changes.
+ *
+ * We use a simple Promise-chaining mutex (no extra dependency): each
+ * workspace gets a chain of Promises; each new writer appends to the tail
+ * and awaits the previous writer's completion before starting its own work.
+ */
+const graphWriteLocks = ((globalThis as { __viberonGraphWriteLocks?: Map<string, Promise<unknown>> })
+  .__viberonGraphWriteLocks ??= new Map<string, Promise<unknown>>());
+
+function withGraphLock<T>(key: string, rootPath: string | null, fn: () => Promise<T>): Promise<T> {
+  const lockKey = cacheKey(key, rootPath);
+  const previous = graphWriteLocks.get(lockKey) ?? Promise.resolve();
+  const next = previous.then(fn, fn); // always advance the chain, even on error
+  graphWriteLocks.set(lockKey, next);
+  return next as Promise<T>;
+}
+
 function indexPath(rootPath: string): string {
   return path.join(rootPath, VIBERON_DIR, "graph.json");
 }
@@ -145,32 +169,34 @@ export async function indexWorkspaceFiles(
   repoRef: string,
   files: RepoFile[],
 ): Promise<{ graph: Graph; stats: IndexStats }> {
-  const previous = await loadIndex(key, rootPath);
-  const doc: GraphIndexDoc = {
-    version: GRAPH_INDEX_VERSION,
-    repoRef,
-    aliases: loadPathAliases(files),
-    goModule: goModuleOf(files),
-    files: {},
-  };
-  const stats: IndexStats = { parsed: 0, reused: 0, removed: 0 };
-  for (const file of files) {
-    if (!isSourceFilePath(file.path)) continue;
-    const hash = hashSource(file.source);
-    const cached = previous?.files[file.path];
-    if (cached && cached.hash === hash) {
-      doc.files[file.path] = cached;
-      stats.reused += 1;
-    } else {
-      doc.files[file.path] = extractFile(file);
-      stats.parsed += 1;
+  return withGraphLock(key, rootPath, async () => {
+    const previous = await loadIndex(key, rootPath);
+    const doc: GraphIndexDoc = {
+      version: GRAPH_INDEX_VERSION,
+      repoRef,
+      aliases: loadPathAliases(files),
+      goModule: goModuleOf(files),
+      files: {},
+    };
+    const stats: IndexStats = { parsed: 0, reused: 0, removed: 0 };
+    for (const file of files) {
+      if (!isSourceFilePath(file.path)) continue;
+      const hash = hashSource(file.source);
+      const cached = previous?.files[file.path];
+      if (cached && cached.hash === hash) {
+        doc.files[file.path] = cached;
+        stats.reused += 1;
+      } else {
+        doc.files[file.path] = extractFile(file);
+        stats.parsed += 1;
+      }
     }
-  }
-  if (previous) {
-    stats.removed = Object.keys(previous.files).filter((p) => !(p in doc.files)).length;
-  }
-  await saveIndex(key, rootPath, doc);
-  return { graph: linkDoc(doc), stats };
+    if (previous) {
+      stats.removed = Object.keys(previous.files).filter((p) => !(p in doc.files)).length;
+    }
+    await saveIndex(key, rootPath, doc);
+    return { graph: linkDoc(doc), stats };
+  });
 }
 
 /**
@@ -185,18 +211,20 @@ export async function patchIndexedFile(
   source: string | null,
 ): Promise<Graph | null> {
   if (/(^|\/)(tsconfig[^/]*|jsconfig[^/]*)\.json$|^go\.mod$/.test(filePath)) return null;
-  const current = await loadIndex(key, rootPath);
-  if (!current) return null;
-  if (source === null ? !(filePath in current.files) : !isSourceFilePath(filePath)) {
-    return linkDoc(current);
-  }
-  if (source !== null && current.files[filePath]?.hash === hashSource(source)) return linkDoc(current);
-  // New doc object (not an in-place edit) so readers' per-doc caches invalidate.
-  const doc: GraphIndexDoc = { ...current, files: { ...current.files } };
-  if (source === null) delete doc.files[filePath];
-  else doc.files[filePath] = extractFile({ path: filePath, source });
-  await saveIndex(key, rootPath, doc);
-  return linkDoc(doc);
+  return withGraphLock(key, rootPath, async () => {
+    const current = await loadIndex(key, rootPath);
+    if (!current) return null;
+    if (source === null ? !(filePath in current.files) : !isSourceFilePath(filePath)) {
+      return linkDoc(current);
+    }
+    if (source !== null && current.files[filePath]?.hash === hashSource(source)) return linkDoc(current);
+    // New doc object (not an in-place edit) so readers' per-doc caches invalidate.
+    const doc: GraphIndexDoc = { ...current, files: { ...current.files } };
+    if (source === null) delete doc.files[filePath];
+    else doc.files[filePath] = extractFile({ path: filePath, source });
+    await saveIndex(key, rootPath, doc);
+    return linkDoc(doc);
+  });
 }
 
 /** Current graph from the cached index without touching any file. */

@@ -6,6 +6,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 import { buildRepoEnv } from "@/lib/verify/env";
 import { extractFailures } from "@/lib/verify/extract";
@@ -105,8 +107,16 @@ export function execInRepo(
 }
 
 /** Expand `{files}` in a target template with shell-quoted paths. */
-export function targetCommand(cmd: VerifyCommand, targets: string[] | undefined): string {
+export function targetCommand(cmd: VerifyCommand, targets: string[] | undefined, root?: string): string {
   if (!targets?.length || !cmd.targetTemplate) return cmd.command;
+  if (cmd.framework === "unittest" && targets.length === 1 && root) {
+    const rel = targets[0]!;
+    const dir = path.dirname(rel);
+    const base = path.basename(rel);
+    if (dir !== "." && !existsSync(path.join(root, dir, "__init__.py"))) {
+      return `python -m unittest discover -v -s ${shellQuote(dir)} -p ${shellQuote(base)}`;
+    }
+  }
   return cmd.targetTemplate.replace("{files}", targets.map(shellQuote).join(" "));
 }
 
@@ -115,7 +125,7 @@ export async function runVerification(
   cmd: VerifyCommand,
   options: RunVerificationOptions,
 ): Promise<VerificationReport> {
-  const command = targetCommand(cmd, options.targets);
+  const command = targetCommand(cmd, options.targets, root);
   const result = await execInRepo(root, command, { timeoutMs: options.timeoutMs, signal: options.signal });
   const output = cleanOutput(result.output);
   const parsed = cmd.kind === "test" ? parseTestOutput(cmd.framework, output) : { tests: {}, summary: null };

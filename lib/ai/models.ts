@@ -276,14 +276,58 @@ export function ensureModel(id: string): ModelSpec | undefined {
       nvidiaModel(id.slice("nvidia:".length), id.slice("nvidia:".length), "NVIDIA API Catalog model.", "balanced", 128_000, true),
     );
   }
-  const envId = envModelId();
-  if (!id.startsWith("openai:") && id !== envId) return undefined;
+  if (id.startsWith("anthropic:") && id.length > "anthropic:".length) {
+    const wire = id.slice("anthropic:".length);
+    return registerModel({
+      id,
+      provider: "anthropic",
+      label: wire,
+      blurb: "Anthropic model.",
+      tier: "frontier",
+      contextWindow: 200_000,
+      maxOutput: 64_000,
+      defaultMaxOutput: 32_000,
+      pricing: { input: 3, output: 15 },
+      supportsEffort: true,
+      supportsThinking: true,
+      supportsCaching: true,
+      agentic: true,
+    });
+  }
+  if (id.startsWith("groq:") && id.length > "groq:".length) {
+    const wire = id.slice("groq:".length);
+    return registerModel({
+      id,
+      provider: "groq",
+      label: `${wire} (Groq)`,
+      blurb: "Groq-hosted model.",
+      tier: "balanced",
+      contextWindow: 128_000,
+      maxOutput: 32_000,
+      defaultMaxOutput: 4_096,
+      pricing: { input: 0.5, output: 0.8 },
+      supportsEffort: false,
+      supportsThinking: false,
+      supportsCaching: false,
+      agentic: true,
+    });
+  }
+  const isOpenAiCompat =
+    id.startsWith("openai:") ||
+    id.startsWith("ollama:") ||
+    id.startsWith("openrouter:") ||
+    id.startsWith("vllm:") ||
+    id.startsWith("deepseek:") ||
+    id === envModelId();
+
+  if (!isOpenAiCompat) return undefined;
   const window = Number(process.env.VIBERON_CONTEXT_WINDOW || process.env.AI_CONTEXT_WINDOW);
+  const cleanLabel = id.replace(/^(openai|ollama|openrouter|vllm|deepseek):/, "");
   return registerModel({
     id,
     provider: "openai",
-    label: id.replace(/^openai:/, ""),
-    blurb: "OpenAI-compatible endpoint configured from the environment.",
+    label: cleanLabel,
+    blurb: "OpenAI-compatible endpoint.",
     tier: "balanced",
     contextWindow: Number.isFinite(window) && window > 1000 ? window : 128_000,
     maxOutput: 32_000,
