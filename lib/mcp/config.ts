@@ -55,6 +55,10 @@ export interface RawServerEntry {
   disabled?: boolean;
   trusted?: boolean;
   timeout?: number;
+  /** Set when the entry was installed from the MCP marketplace catalog. */
+  catalogId?: string;
+  /** Non-secret marketplace form values, kept to prefill a reconfigure. */
+  catalogValues?: Record<string, string>;
 }
 
 export interface McpServerConfig {
@@ -250,6 +254,62 @@ export function expandTransport(
   missing?: Set<string>,
 ): McpTransportConfig {
   const x = (s: string) => expandEnv(s, env, missing);
+  const mapValues = (r: Record<string, string>) =>
+    Object.fromEntries(Object.entries(r).map(([k, v]) => [k, x(v)]));
+  if (transport.type === "stdio") {
+    return {
+      type: "stdio",
+      command: x(transport.command),
+      args: transport.args.map(x),
+      env: mapValues(transport.env),
+      ...(transport.cwd ? { cwd: x(transport.cwd) } : {}),
+    };
+  }
+  return { type: transport.type, url: x(transport.url), headers: mapValues(transport.headers) };
+}
+
+/* ---------------------------- secret references --------------------------- */
+
+/**
+ * `${secret:NAME}` points at a value in the credentials store instead of
+ * holding it inline (see `lib/ai/credentials.ts`, `getMcpSecret`). The
+ * reference is scoped to the server that contains it, so one server cannot
+ * name another server's secret. `expandEnv` leaves these untouched (`secret:`
+ * is not a valid variable name), so the two passes compose.
+ */
+const SECRET_REF = /\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+export const secretRef = (name: string) => `\${secret:${name}}`;
+
+/** Every secret name a transport references, deduplicated, in order. */
+export function secretRefs(transport: McpTransportConfig): string[] {
+  const values =
+    transport.type === "stdio"
+      ? [transport.command, ...transport.args, ...Object.values(transport.env), transport.cwd ?? ""]
+      : [transport.url, ...Object.values(transport.headers)];
+  const names = new Set<string>();
+  for (const value of values) {
+    for (const match of value.matchAll(SECRET_REF)) names.add(match[1]!);
+  }
+  return [...names];
+}
+
+/**
+ * Replace `${secret:NAME}` with resolved values. Unresolved references
+ * become "" and are reported through `missing` as `secret:NAME`.
+ */
+export function expandSecretRefs(
+  transport: McpTransportConfig,
+  secrets: Record<string, string>,
+  missing?: Set<string>,
+): McpTransportConfig {
+  const x = (s: string) =>
+    s.replace(SECRET_REF, (_match, name: string) => {
+      const v = secrets[name];
+      if (v) return v;
+      missing?.add(`secret:${name}`);
+      return "";
+    });
   const mapValues = (r: Record<string, string>) =>
     Object.fromEntries(Object.entries(r).map(([k, v]) => [k, x(v)]));
   if (transport.type === "stdio") {

@@ -143,3 +143,68 @@ export async function allCredentialStatus(): Promise<CredentialStatus[]> {
     (["anthropic", "groq", "openai", "nvidia", "gemini"] as ProviderId[]).map(credentialStatus),
   );
 }
+
+/* ----------------------------- MCP secrets -------------------------------- */
+
+/**
+ * Secrets for MCP servers (API keys, tokens, connection strings) live in the
+ * same store under `credential:mcp:<server>:<NAME>`. Server configs hold only
+ * a `${secret:NAME}` reference, which the MCP manager resolves at launch, so
+ * the config itself is safe to show (redacted) and to export.
+ */
+const MCP_SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function mcpSecretKey(server: string, name: string): string {
+  if (!MCP_SECRET_NAME.test(name)) throw new Error(`Invalid secret name: ${name}`);
+  return `${KEY_PREFIX}mcp:${encodeURIComponent(server)}:${name}`;
+}
+
+export async function getMcpSecret(server: string, name: string): Promise<string | null> {
+  try {
+    const { getValueRaw } = await store();
+    const value = await getValueRaw<string>(mcpSecretKey(server, name));
+    return value && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve several names at once; unset names are simply absent. */
+export async function getMcpSecrets(server: string, names: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const name of names) {
+    const value = await getMcpSecret(server, name);
+    if (value !== null) out[name] = value;
+  }
+  return out;
+}
+
+/** Store (or, with null / "", delete) one secret. Values are kept verbatim. */
+export async function setMcpSecret(server: string, name: string, value: string | null): Promise<void> {
+  const { setValueRaw } = await store();
+  await setValueRaw(mcpSecretKey(server, name), value ? value : null);
+}
+
+export interface McpSecretStatus {
+  name: string;
+  configured: boolean;
+  /** Masked fingerprint, or null when unset. Never the value. */
+  masked: string | null;
+}
+
+/**
+ * Stricter than `maskKey`: MCP secrets include connection strings and short
+ * tokens, so show at most the last four characters, and only of long values.
+ */
+export function maskMcpSecret(value: string): string {
+  return value.length >= 16 ? `••••${value.slice(-4)}` : "••••";
+}
+
+export async function mcpSecretStatus(server: string, names: string[]): Promise<McpSecretStatus[]> {
+  return Promise.all(
+    names.map(async (name) => {
+      const value = await getMcpSecret(server, name);
+      return { name, configured: value !== null, masked: value ? maskMcpSecret(value) : null };
+    }),
+  );
+}

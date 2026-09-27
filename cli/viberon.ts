@@ -12,7 +12,10 @@
  *   viberon issues [--repo <path>] [--label <l>] [--fix <n,n|all>] [--no-deliver] [--model <id>] [--json]
  *   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
  *   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+ *   viberon mcp list|search|install|remove|enable|disable|test …   (see cli/mcp.ts)
  */
+
+import { MCP_USAGE, McpCliError, parseMcpArgs, type McpArgs } from "./mcp";
 
 export const USAGE = `Usage:
   viberon run --repo <path> (--task <text|issue-url> | --task-file <file>) [options]
@@ -38,6 +41,7 @@ export const USAGE = `Usage:
       worktree of origin/<default>, and opens a draft PR for every fix its checks prove
   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+${MCP_USAGE}
 
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
 Exit codes (review): 0 reviewed, 2 error.
@@ -100,7 +104,7 @@ export interface EvalArgs {
   timeoutSec?: number;
 }
 
-export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | { command: "help" };
+export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | McpArgs | { command: "help" };
 
 export class CliError extends Error {}
 
@@ -161,6 +165,14 @@ const KNOWN: Record<string, Set<string>> = {
 export function parseCliArgs(argv: string[]): CliArgs {
   const [command, ...rest] = argv;
   if (!command || command === "help" || command === "--help" || command === "-h") return { command: "help" };
+  if (command === "mcp") {
+    try {
+      return parseMcpArgs(rest);
+    } catch (error) {
+      if (error instanceof McpCliError) throw new CliError(error.message);
+      throw error;
+    }
+  }
   if (!(command in KNOWN)) throw new CliError(`Unknown command: ${command}`);
   const { flags, positionals } = splitFlags(rest);
   if (flags.has("help")) return { command: "help" };
@@ -271,6 +283,11 @@ export async function main(argv: string[]): Promise<number> {
   if (args.command === "help") {
     process.stdout.write(`${USAGE}\n`);
     return 0;
+  }
+
+  if (args.command === "mcp") {
+    const { runMcp } = await import("./mcp");
+    return runMcp(args);
   }
 
   if (args.command === "run") {
