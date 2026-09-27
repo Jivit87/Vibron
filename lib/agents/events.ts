@@ -155,7 +155,14 @@ export type OrchestrationEvent =
   | { type: "orchestrator_thinking"; text: string }
   | { type: "orchestrator_text"; text: string }
   /** `awaitingApproval` is true in plan mode: nothing runs until the user approves. */
-  | { type: "plan"; plan: RunPlan; awaitingApproval?: boolean }
+  | {
+      type: "plan";
+      plan: RunPlan;
+      awaitingApproval?: boolean;
+      /** The immutable plan version this plan was saved as (lib/plans). */
+      versionId?: string;
+      parentVersionId?: string | null;
+    }
   /** A specialist has been dispatched. */
   | {
       type: "agent_start";

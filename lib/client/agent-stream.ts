@@ -14,6 +14,7 @@ import type { ApprovalDecision, OrchestrationEvent, RunPlan, RunStatus } from "@
 import { RUN_ID_HEADER, type AgentRequest, type Interaction } from "@/lib/harness/contracts";
 import type { ContextAttachment, ImageAttachment } from "@/lib/composer/types";
 import { answerMockApproval, isMockMode, mockResponse, mockScript, mockTaskScript } from "@/lib/client/mock-run";
+import { createRun, reduceRun } from "@/lib/client/run-reducer";
 import { useViberon } from "@/store/viberon";
 
 /** Parse one `data:`-prefixed SSE frame. */
@@ -93,6 +94,8 @@ export interface SendPromptOptions {
   interaction?: Interaction;
   /** Execute this approved plan instead of planning again. */
   plan?: RunPlan;
+  /** The plan version `plan` came from, so the server can link an edit to it. */
+  planVersionId?: string;
   attachments?: ContextAttachment[];
   images?: ImageAttachment[];
 }
@@ -141,6 +144,7 @@ export async function sendPrompt(
     interaction,
     mode: settings.agentMode,
     plan: options.plan,
+    ...(options.plan && options.planVersionId ? { planVersionId: options.planVersionId } : {}),
     model: settings.model,
     commandPolicy: settings.commandPolicy,
     editPolicy: settings.editPolicy,
@@ -367,11 +371,39 @@ async function pumpRun({
   }
 }
 
-/** Execute a plan the user reviewed (and possibly edited). */
-export async function runPlan(plan: RunPlan, prompt: string): Promise<void> {
+/**
+ * Execute a plan the user reviewed (and possibly edited). `planVersionId`
+ * is the version it came from: unchanged, the run is recorded against it;
+ * edited, the server saves the edit as a child version.
+ */
+export async function runPlan(plan: RunPlan, prompt: string, planVersionId?: string): Promise<void> {
   const state = useViberon.getState();
   if (state.run) state.updatePlan(plan);
-  await sendPrompt(prompt, { plan, silent: true, interaction: "agent" });
+  await sendPrompt(prompt, { plan, planVersionId, silent: true, interaction: "agent" });
+}
+
+/**
+ * Put a stored plan version in front of the user for review and editing,
+ * without running anything: the run view shows it exactly as plan mode
+ * does, and its Run button executes it as (a child of) that version.
+ */
+export function reviewPlanVersion(version: { id: string; prompt: string; model: string; plan: RunPlan }): void {
+  if (useViberon.getState().streaming) {
+    toast.error("A run is already in progress. Stop it first.");
+    return;
+  }
+  const now = Date.now();
+  let n = 0;
+  const ctx = { now, nextId: (prefix: string) => `${prefix}_review_${now}_${(n += 1)}` };
+  let run = createRun({ id: `run_review_${now}`, prompt: version.prompt, model: version.model, mode: "plan", now, interaction: "plan" });
+  run = reduceRun(run, { type: "plan", plan: version.plan, awaitingApproval: true, versionId: version.id }, ctx);
+  run = reduceRun(
+    run,
+    { type: "run_done", status: "done", summary: "", filesChanged: 0, durationMs: 0, costUsd: 0 },
+    ctx,
+  );
+  // Not a run: nothing streams, and nothing is added to the conversation.
+  useViberon.setState({ run: { ...run, endedAt: now } });
 }
 
 /** Re-pull the file list and project memory after a run. */

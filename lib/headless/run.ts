@@ -11,7 +11,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createWriteStream, existsSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +41,14 @@ export interface HeadlessOptions {
   /** Run in a detached `git worktree` of HEAD; the original checkout is untouched. */
   worktree?: boolean;
   keepWorktree?: boolean;
+  /** With `worktree`: check out this tree instead of HEAD, and link dependency dirs (see `createWorktree`). */
+  worktreeOptions?: WorktreeOptions;
+  /** Every orchestration event, as it is written to the trajectory. */
+  onEvent?: (event: OrchestrationEvent) => void;
+  /** Write a fix note to the repo's memory afterwards (default true). */
+  recordMemory?: boolean;
+  /** Running inside the app server (experiments): leave the store mode alone. */
+  embedded?: boolean;
   out?: string;
   testCmd?: string;
   noGate?: boolean;
@@ -165,7 +173,25 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 }
 
-async function createWorktree(repo: string, taskId: string): Promise<string> {
+export interface WorktreeOptions {
+  /**
+   * A tree (or commit) to materialize instead of HEAD: e.g. a `snapshot()`
+   * of the work tree, so uncommitted changes come along. Its objects must be
+   * in the repository (snapshots of the repo are).
+   */
+  baseTree?: string;
+  /**
+   * Symlink the repo's git-ignored dependency directories (node_modules,
+   * .venv, venv) into the worktree so its checks can run without a fresh
+   * install. Ignored paths never enter a snapshot or a patch.
+   */
+  linkDependencies?: boolean;
+}
+
+const DEPENDENCY_DIRS = new Set(["node_modules", ".venv", "venv"]);
+
+/** A detached `git worktree` of HEAD (or of `baseTree`) in a fresh temporary directory. */
+export async function createWorktree(repo: string, taskId: string, options: WorktreeOptions = {}): Promise<string> {
   try {
     git(repo, ["rev-parse", "--verify", "HEAD"]);
   } catch {
@@ -174,7 +200,64 @@ async function createWorktree(repo: string, taskId: string): Promise<string> {
   const base = await mkdtemp(path.join(os.tmpdir(), "viberon-wt-"));
   const dir = path.join(base, taskId);
   git(repo, ["worktree", "add", "--detach", dir, "HEAD"]);
+  try {
+    if (options.baseTree && options.baseTree !== git(repo, ["rev-parse", "HEAD^{tree}"])) {
+      // Index and files both follow the tree; files it lacks are removed.
+      git(dir, ["read-tree", "-u", "--reset", options.baseTree]);
+    }
+    if (options.linkDependencies) linkDependencies(repo, dir);
+  } catch (error) {
+    removeWorktree(repo, dir);
+    throw error;
+  }
   return dir;
+}
+
+function linkDependencies(repo: string, dir: string): void {
+  let ignored: string[];
+  try {
+    ignored = execFileSync("git", ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], {
+      cwd: repo,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return;
+  }
+  for (const raw of ignored) {
+    const rel = raw.replace(/\/$/, "");
+    if (!DEPENDENCY_DIRS.has(path.basename(rel)) || rel.split("/").length > 3) continue;
+    const target = path.join(dir, rel);
+    if (existsSync(target)) continue;
+    try {
+      mkdirSync(path.dirname(target), { recursive: true });
+      symlinkSync(path.join(repo, rel), target);
+    } catch {
+      // A missing link only means the checks may not find their dependencies.
+    }
+  }
+}
+
+/** Remove a worktree made by `createWorktree`, and its temporary parent directory. */
+export function removeWorktree(repo: string, dir: string): boolean {
+  let removed = true;
+  try {
+    git(repo, ["worktree", "remove", "--force", dir]);
+  } catch {
+    removed = false;
+  }
+  try {
+    // Only ever delete a directory this module created (`<tmp>/viberon-wt-*/<id>`).
+    const parent = path.dirname(dir);
+    if (path.basename(parent).startsWith("viberon-wt-")) rmSync(parent, { recursive: true, force: true });
+    git(repo, ["worktree", "prune"]);
+  } catch {
+    // Pruning is housekeeping; the directory is already gone.
+  }
+  return removed || !existsSync(dir);
 }
 
 function issueFromTask(task: string | undefined): string | undefined {
@@ -234,7 +317,8 @@ async function defaultModel(): Promise<string> {
 }
 
 export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps = {}): Promise<HeadlessOutcome> {
-  process.env.VIBERON_STORE ??= "memory";
+  // Inside the app server the store is the app's own; only a bare process defaults to memory.
+  if (!options.embedded) process.env.VIBERON_STORE ??= "memory";
   const log = options.log ?? (() => {});
   const startedAt = new Date();
   const taskId = options.taskId ?? newTaskId();
@@ -258,7 +342,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     if (!existsSync(repo) || !statSync(repo).isDirectory()) throw new Error(`Repository not found: ${repo}`);
     task = await resolveTask(options, deps.fetchIssue);
     if (options.worktree) {
-      workRoot = await createWorktree(repo, taskId);
+      workRoot = await createWorktree(repo, taskId, options.worktreeOptions);
       log(`worktree: ${workRoot}`);
     }
 
@@ -307,6 +391,13 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     const emit = (event: OrchestrationEvent) => {
       eventCount += 1;
       writeLine({ type: "event", t: Date.now(), event });
+      if (options.onEvent) {
+        try {
+          options.onEvent(event);
+        } catch {
+          // An observer must never break the run it watches.
+        }
+      }
     };
     // Trust belongs to the repository the user named, not to a temporary
     // worktree of it; the file itself is read (and hashed) where the run works.
@@ -380,7 +471,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
   ]);
 
   // Run memory: the next task on the same area sees what was fixed and why.
-  if (result.status !== "error" && result.filesChanged.length) {
+  if (options.recordMemory !== false && result.status !== "error" && result.filesChanged.length) {
     try {
       recordFixNote(options.worktree ? repo : workRoot, {
         issue: task,
@@ -394,11 +485,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
   }
 
   if (options.worktree && workRoot !== repo && !options.keepWorktree) {
-    try {
-      git(repo, ["worktree", "remove", "--force", workRoot]);
-    } catch {
-      log(`could not remove worktree ${workRoot}`);
-    }
+    if (!removeWorktree(repo, workRoot)) log(`could not remove worktree ${workRoot}`);
   }
 
   return { exitCode, outDir, result: json };

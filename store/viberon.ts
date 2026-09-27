@@ -98,6 +98,7 @@ export type SidebarView =
   | "scm"
   | "graph"
   | "changes"
+  | "plans"
   | "memory";
 export type BottomPanel = "terminal" | "problems" | "ledger" | "tasks" | "issues" | "review" | null;
 

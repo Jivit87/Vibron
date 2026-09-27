@@ -21,6 +21,7 @@ import {
   Files,
   GitBranch,
   GitCompare,
+  GitFork,
   Network,
   Plus,
   Search,
@@ -36,6 +37,7 @@ import { EditorPane } from "@/components/vibe/EditorPane";
 import { FileTree } from "@/components/vibe/FileTree";
 import { LedgerPanel } from "@/components/vibe/LedgerPanel";
 import { MemoryPanel } from "@/components/vibe/MemoryPanel";
+import { PlansPanel } from "@/components/vibe/PlansPanel";
 import { PreviewPanel } from "@/components/vibe/PreviewPanel";
 import { ProblemsPanel } from "@/components/vibe/ProblemsPanel";
 import { ScmPanel } from "@/components/vibe/ScmPanel";
@@ -61,6 +63,7 @@ const ACTIVITY_ITEMS: {
   { view: "search", icon: <Search className="size-[18px]" />, label: "Search", shortcut: "⌘⇧F" },
   { view: "scm", icon: <GitBranch className="size-[18px]" />, label: "Source Control", shortcut: "⌘⇧G" },
   { view: "changes", icon: <GitCompare className="size-[18px]" />, label: "Agent Changes" },
+  { view: "plans", icon: <GitFork className="size-[18px]" />, label: "Plans & Experiments" },
   { view: "graph", icon: <Network className="size-[18px]" />, label: "Graph", shortcut: "⌘G" },
   { view: "memory", icon: <Brain className="size-[18px]" />, label: "Memory" },
 ];
@@ -326,6 +329,8 @@ function SidebarBody({ view }: { view: SidebarView }) {
       return <ScmPanel />;
     case "changes":
       return <ChangesPanel />;
+    case "plans":
+      return <PlansPanel />;
     case "memory":
       return <MemoryPanel />;
     case "explorer":

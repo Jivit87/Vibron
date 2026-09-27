@@ -24,6 +24,7 @@ import { solveTask } from "@/lib/harness/solve";
 import { resolveModel } from "@/lib/ai";
 import { detectVerifyCommands } from "@/lib/verify";
 import { recordFixNote } from "@/lib/memory/graph";
+import { isPlanVersionId } from "@/lib/plans/store";
 
 export const runtime = "nodejs";
 /** Long-horizon runs: a full-stack build can legitimately take minutes. */
@@ -88,6 +89,7 @@ export async function POST(request: Request) {
       ? body.interaction
       : "agent";
   const plan = interaction === "agent" ? parsePlan(body.plan) : undefined;
+  const planVersionId = plan && isPlanVersionId(body.planVersionId) ? body.planVersionId : undefined;
   const mode =
     body.mode === "single" || body.mode === "orchestrated" ? body.mode : "auto";
   const model = typeof body.model === "string" ? body.model : "auto";
@@ -216,6 +218,7 @@ export async function POST(request: Request) {
           concurrency,
           interaction,
           plan,
+          ...(planVersionId ? { planVersionId } : {}),
           showThinking,
           retrieval,
           attachments: await resolveAttachments(handle, attachments),

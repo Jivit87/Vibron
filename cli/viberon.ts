@@ -14,10 +14,19 @@
  *   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
  *   viberon mcp list|search|install|remove|enable|disable|test …   (see cli/mcp.ts)
  *   viberon hooks list|trust|revoke [--repo <path>] [--yes] [--hash <sha256>] [--json]
+ *   viberon plan list|show|diff …  viberon experiment run|list|show|promote|undo|discard …  (see cli/plans.ts)
  */
 
 import { MCP_USAGE, McpCliError, parseMcpArgs, type McpArgs } from "./mcp";
 import type { HooksArgs } from "./hooks";
+import {
+  parseExperimentArgs,
+  parsePlanArgs,
+  PLANS_USAGE,
+  PlansCliError,
+  type ExperimentArgs,
+  type PlanArgs,
+} from "./plans";
 
 export const USAGE = `Usage:
   viberon run --repo <path> (--task <text|issue-url> | --task-file <file>) [options]
@@ -48,7 +57,9 @@ ${MCP_USAGE}
       list shows the workspace (.viberon/hooks.json) and user (~/.viberon/hooks.json) hooks and
       whether the workspace file is trusted; trust approves this exact version of the workspace file
       (asks first; --yes for CI, --hash to pin the version); revoke withdraws the approval
+${PLANS_USAGE}
 
+Exit codes (experiment run): 0 a winner was found, 1 no branch produced a clean change, 2 error.
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
 Exit codes (review): 0 reviewed, 2 error.
 Exit codes (issues): 0 listed / every fix succeeded, 1 some fix failed, 2 error.`;
@@ -112,7 +123,19 @@ export interface EvalArgs {
 
 export type { HooksArgs } from "./hooks";
 
-export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | McpArgs | HooksArgs | { command: "help" };
+export type { ExperimentArgs, PlanArgs } from "./plans";
+
+export type CliArgs =
+  | RunArgs
+  | ReviewArgs
+  | IssuesArgs
+  | CloneArgs
+  | EvalArgs
+  | McpArgs
+  | HooksArgs
+  | PlanArgs
+  | ExperimentArgs
+  | { command: "help" };
 
 export class CliError extends Error {}
 
@@ -179,6 +202,15 @@ export function parseCliArgs(argv: string[]): CliArgs {
       return parseMcpArgs(rest);
     } catch (error) {
       if (error instanceof McpCliError) throw new CliError(error.message);
+      throw error;
+    }
+  }
+  if (command === "plan" || command === "experiment") {
+    if (rest.includes("--help") || rest.includes("-h")) return { command: "help" };
+    try {
+      return command === "plan" ? parsePlanArgs(rest) : parseExperimentArgs(rest);
+    } catch (error) {
+      if (error instanceof PlansCliError) throw new CliError(error.message);
       throw error;
     }
   }
@@ -314,6 +346,17 @@ export async function main(argv: string[]): Promise<number> {
   if (args.command === "mcp") {
     const { runMcp } = await import("./mcp");
     return runMcp(args);
+  }
+
+  if (args.command === "plan" || args.command === "experiment") {
+    const cli = await import("./plans");
+    const io = { out: (text: string) => process.stdout.write(text), err: (text: string) => process.stderr.write(text) };
+    try {
+      return args.command === "plan" ? await cli.planCommand(args, io) : await cli.experimentCommand(args, io, log);
+    } catch (error) {
+      log(`${args.command} failed: ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
   }
 
   if (args.command === "run") {
