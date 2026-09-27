@@ -79,6 +79,8 @@ export function AgentRunView({ run }: { run: RunState }) {
     <div className="flex flex-col gap-2">
       <RunHeader run={run} />
 
+      {run.sessionHooks?.map((item, i) => (item.kind === "hook" ? <HookRow key={i} item={item} /> : null))}
+
       {fix && <FixPhases run={run} />}
 
       {fix && <LocalizationBlock run={run} />}
@@ -646,17 +648,7 @@ function FeedRow({
         </div>
       );
     case "hook":
-      return (
-        <div
-          className="flex h-[22px] items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[11.5px]"
-          style={{ color: item.blocked ? "var(--vb-amber)" : "var(--vb-text-dim)" }}
-          title={item.output}
-        >
-          <span>hook {item.event}</span>
-          <span className="truncate">{item.command}</span>
-          <span>{item.blocked ? "blocked" : `exit ${item.exitCode ?? "?"}`}</span>
-        </div>
-      );
+      return <HookRow item={item} />;
     case "verification": {
       const record = run.verifications[item.index];
       return record ? <VerificationRow record={record} /> : null;
@@ -705,6 +697,33 @@ function FeedRow({
         </button>
       );
   }
+}
+
+function hookStatus(item: Extract<FeedItem, { kind: "hook" }>): string {
+  if (item.outcome === "skipped") return "skipped";
+  if (item.outcome === "error") return item.exitCode === null ? "error" : `error, exit ${item.exitCode}`;
+  if (item.blocked) return "blocked";
+  if (item.outcome === "modified") return "modified input";
+  return `exit ${item.exitCode ?? "?"}`;
+}
+
+/** One lifecycle-hook run (lib/hooks); the full message is in the tooltip. */
+function HookRow({ item }: { item: Extract<FeedItem, { kind: "hook" }> }) {
+  const warn = item.blocked || item.outcome === "error" || item.outcome === "skipped";
+  return (
+    <div
+      className="flex h-[22px] items-center gap-2 overflow-hidden whitespace-nowrap font-mono text-[11.5px]"
+      style={{ color: warn ? "var(--vb-amber)" : "var(--vb-text-dim)" }}
+      title={item.output || undefined}
+    >
+      <span>
+        hook {item.event}
+        {item.tool ? ` ${item.tool}` : ""}
+      </span>
+      <span className="truncate">{item.command}</span>
+      <span className="shrink-0">{hookStatus(item)}</span>
+    </div>
+  );
 }
 
 function ThinkingRow({ text, live }: { text: string; live: boolean }) {

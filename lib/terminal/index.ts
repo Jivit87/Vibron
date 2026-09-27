@@ -41,7 +41,7 @@ import {
 export { classifyCommand, scrubEnv, type CommandVerdict } from "./safety";
 
 export type TerminalStatus = "running" | "exited" | "killed" | "failed";
-export type TerminalOrigin = "user" | "agent";
+export type TerminalOrigin = "user" | "agent" | "hook";
 
 export interface TerminalChunk {
   stream: "stdout" | "stderr" | "system";
@@ -228,6 +228,11 @@ export interface RunOptions {
    */
   repoEnv?: boolean;
   /**
+   * Written to the process's stdin, which is then closed (hooks read their
+   * event JSON this way). Without it, agent processes get EOF on stdin.
+   */
+  stdin?: string;
+  /**
    * Docker sandbox configuration. When enabled, commands run in an isolated
    * container with resource limits and network restrictions.
    */
@@ -296,7 +301,7 @@ function startCommandDirect(
       },
       // Users can type into their own sessions; agents get EOF on stdin so
       // an interactive prompt fails fast instead of hanging the run.
-      stdio: [session.origin === "user" ? "pipe" : "ignore", "pipe", "pipe"],
+      stdio: [session.origin === "user" || options.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       detached: !IS_WINDOWS,
     });
   } catch (error) {
@@ -315,6 +320,7 @@ function startCommandDirect(
   child.stdin?.on("error", () => {
     // EPIPE after the process exits; nothing to do.
   });
+  if (options.stdin !== undefined) child.stdin?.end(options.stdin);
 
   child.stdout?.on("data", (buffer: Buffer) => {
     pushChunk(session, "stdout", buffer.toString("utf8"));

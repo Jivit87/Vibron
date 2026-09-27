@@ -13,6 +13,7 @@ import { useViberon, type AppSettings } from "@/store/viberon";
 import { cx, Segmented, SettingRow as Row, Switch } from "@/components/vibe/primitives";
 import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
 import { McpMarketplace } from "@/components/vibe/McpMarketplace";
+import { HooksSettings } from "@/components/vibe/HooksSettings";
 
 interface ProviderStatus {
   provider: "anthropic" | "groq" | "openai" | "nvidia" | "gemini";
@@ -62,6 +63,7 @@ const CATEGORIES = [
   { id: "integrations", label: "Integrations" },
   { id: "marketplace", label: "MCP Marketplace" },
   { id: "permissions", label: "Permissions" },
+  { id: "hooks", label: "Hooks" },
   { id: "retrieval", label: "Retrieval" },
   { id: "editor", label: "Editor" },
 ] as const;
@@ -274,6 +276,14 @@ export function SettingsPage() {
                   <Switch checked={settings.autoPreview} onChange={set("autoPreview")} label="Open preview automatically" />
                 </Row>
               )}
+            </Section>
+
+            <Section
+              id="hooks"
+              title="Hooks"
+              hint="Commands that run before or after tool calls and when a run starts or finishes. Exit 2 blocks; the verification gate still has the final say."
+            >
+              <HooksSettings show={show} />
             </Section>
 
             <Section id="retrieval" title="Retrieval" hint="How much of the code graph agents pull in per request.">

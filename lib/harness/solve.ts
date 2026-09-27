@@ -35,6 +35,7 @@ import {
   type Outcome,
 } from "@/lib/harness/gate";
 import { NUDGES, TrajectoryGuards } from "@/lib/harness/recovery";
+import { loadHookEngine } from "@/lib/hooks/engine";
 import {
   changedFiles,
   diff,
@@ -431,6 +432,20 @@ export async function solveTask(options: SolveOptions): Promise<SolveResult> {
   try {
     root = handle.rootPath;
     if (!root) throw new Error("solveTask needs a workspace on disk (open a local folder or clone a repository).");
+    const hooks =
+      options.hooks !== undefined
+        ? options.hooks
+        : await loadHookEngine({ root, repoKey: handle.repoKey, runId: options.runId, emit, signal: options.signal }).catch(
+            () => null,
+          );
+    let hookContext = "";
+    if (hooks && !hooks.isEmpty) {
+      const started = await hooks.sessionStart({ source: "solve", prompt: options.task });
+      const submitted = await hooks.userPromptSubmit({ prompt: options.task });
+      if (submitted.blocked) throw new Error(`A UserPromptSubmit hook rejected this task: ${submitted.reason}`);
+      const context = [started, submitted.context].filter(Boolean);
+      if (context.length) hookContext = `\n\n<hook_context>\n${context.join("\n\n")}\n</hook_context>`;
+    }
     await ensureModelReady(options.model);
     await ensureScratch(root);
     baseRef = await snapshot(root);
@@ -539,7 +554,7 @@ export async function solveTask(options: SolveOptions): Promise<SolveResult> {
         stepId: `attempt-${n}`,
         role: "solver",
         model: options.model,
-        task: reviewTask ?? initialMessage(options.task, overview, renderLocalization(loc), lessons),
+        task: reviewTask ?? initialMessage(options.task, overview, renderLocalization(loc), lessons) + hookContext,
         title: reviewPass ? "Address review finding" : n === 1 ? "Solve task" : `Solve task (attempt ${n}, fresh context)`,
         attempt: n,
         attemptReason: reviewPass ? "The reviewer flagged a high-severity problem in the accepted change." : retryReason,
@@ -555,6 +570,7 @@ export async function solveTask(options: SolveOptions): Promise<SolveResult> {
         rules,
         showThinking: false,
         controller,
+        hooks,
         mcp: false,
         editSession,
         harness: {

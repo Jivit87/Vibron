@@ -43,6 +43,7 @@ import { getGraph, getFileInfo } from "@/lib/store";
 import { readFile as wsReadFile } from "@/lib/workspace";
 import type { Interaction } from "@/lib/harness/contracts";
 import type { ImageAttachment } from "@/lib/composer/types";
+import { loadHookEngine, type HookEngine } from "@/lib/hooks/engine";
 import { ASSIGNABLE_ROLES, getRole, ROLES, type RoleId } from "@/lib/agents/roles";
 import { guessIntent } from "@/lib/agents/intent";
 import { describeRules, loadRules, type RulesBundle } from "@/lib/agents/rules";
@@ -92,6 +93,11 @@ export interface OrchestrationInput {
   rules?: RulesBundle;
   /** Pasted images; every agent (and the planner) sees them with the task. */
   images?: ImageAttachment[];
+  /**
+   * Lifecycle hooks for this run. Loaded from the workspace (trust applied)
+   * when absent; null disables hooks.
+   */
+  hooks?: HookEngine | null;
 }
 
 /* ----------------------------- plan tool ---------------------------------- */
@@ -302,7 +308,7 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
   const model = await resolveModel(input.model, { agenticOnly: true });
 
   // What the user asked, plus anything they attached with `@`.
-  const request = input.attachments
+  let request = input.attachments
     ? `${input.request}\n\n${input.attachments}`
     : input.request;
 
@@ -340,6 +346,7 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
     | "editPolicy"
     | "retrieval"
     | "images"
+    | "hooks"
   > => ({
     handle: input.handle,
     engine,
@@ -353,6 +360,7 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
     editPolicy: input.editPolicy,
     retrieval: input.retrieval,
     images: input.images,
+    hooks,
   });
 
   /** One agent whose prose is the reply; used by every non-team path. */
@@ -397,7 +405,32 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
     rules: describeRules(rules),
   });
 
+  const hooks =
+    input.hooks !== undefined
+      ? input.hooks
+      : await loadHookEngine({
+          root: input.handle.rootPath,
+          repoKey: input.repoKey,
+          runId,
+          emit: input.emit,
+          signal: input.signal,
+        }).catch(() => null);
+
   try {
+    /* ------------------------------- hooks ------------------------------ */
+    if (hooks && !hooks.isEmpty) {
+      const started = await hooks.sessionStart({ source: "agent", prompt: input.request });
+      const submitted = await hooks.userPromptSubmit({ prompt: input.request });
+      if (submitted.blocked) {
+        const message = `A UserPromptSubmit hook rejected this request: ${submitted.reason}`;
+        input.emit({ type: "answer", text: message });
+        await done(message, null, "failed");
+        return;
+      }
+      const context = [started, submitted.context].filter(Boolean);
+      if (context.length) request = `${request}\n\n## Context from project hooks\n\n${context.join("\n\n")}`;
+    }
+
     /* --------------------------- intent routing ------------------------- */
     /*
      * A question deserves an answer, not a build plan. Route it to a
@@ -458,7 +491,7 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
       let outcome: PlanOutcome = null;
       try {
         outcome = await buildPlan(
-          { ...input, model, memory, engine, ledger, request, rules },
+          { ...input, model, memory, engine, ledger, request, rules, hooks },
           (usage, cost, uncached) => {
             totalUsage = addUsage(totalUsage, usage);
             totalCost += cost;
@@ -821,9 +854,27 @@ async function buildPlan(
         args,
         phase: "start",
       });
-      const output = call.inputError
-        ? `Error: ${call.inputError}`
-        : await runTool(call.name, call.input, ctx);
+      let output: string;
+      if (call.inputError) output = `Error: ${call.inputError}`;
+      else {
+        const hooks = input.hooks && !input.hooks.isEmpty ? input.hooks : null;
+        const pre = hooks ? await hooks.preToolUse({ agentId: "orchestrator", tool: call.name, input: call.input }) : null;
+        if (pre?.decision === "deny") output = `Refused by a PreToolUse hook: ${pre.reason}`;
+        else {
+          const callInput = pre?.input ?? call.input;
+          output = await runTool(call.name, callInput, ctx);
+          const feedback = hooks
+            ? await hooks.postToolUse({
+                agentId: "orchestrator",
+                tool: call.name,
+                input: callInput,
+                output,
+                failed: isToolFailure(output),
+              })
+            : null;
+          if (feedback) output = `${output}\n\n[hook feedback]\n${feedback}`;
+        }
+      }
       const failed = isToolFailure(output);
       input.emit({
         type: "agent_tool",

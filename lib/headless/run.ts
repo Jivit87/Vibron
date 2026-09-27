@@ -21,6 +21,8 @@ import type { DeliverOptions, DeliverResult, reportOnIssue } from "@/lib/deliver
 import { fetchGitHubIssue, parseGitHubIssueUrl } from "@/lib/github";
 import type { SolveOptions, SolveResult, SolveStatus } from "@/lib/harness/solve-types";
 import { renderReport } from "@/lib/headless/report";
+import { loadHookEngine, type HookEngine } from "@/lib/hooks/engine";
+import type { HookRunRecord } from "@/lib/hooks/types";
 import { registerLocalWorkspace } from "@/lib/local-disk-workspace";
 import { recordFixNote } from "@/lib/memory/graph";
 import { detectVerifyCommands } from "@/lib/verify";
@@ -82,6 +84,8 @@ export type HeadlessResultJson = SolveResult & {
   verifyCommands: VerifyCommand[];
   startedAt: string;
   delivery?: HeadlessDelivery;
+  /** Every hook that ran (lib/hooks); also in trajectory.jsonl as `hook` events. */
+  hooks?: HookRunRecord[];
 };
 
 export interface HeadlessOutcome {
@@ -248,6 +252,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
   let verifyCommands: VerifyCommand[] = [];
   let result: SolveResult;
   let eventCount = 0;
+  let hooks: HookEngine | null = null;
 
   try {
     if (!existsSync(repo) || !statSync(repo).isDirectory()) throw new Error(`Repository not found: ${repo}`);
@@ -299,6 +304,14 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = options.timeoutMs ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
     const solve = deps.solve ?? (await import("@/lib/harness/solve")).solveTask;
+    const emit = (event: OrchestrationEvent) => {
+      eventCount += 1;
+      writeLine({ type: "event", t: Date.now(), event });
+    };
+    // Trust belongs to the repository the user named, not to a temporary
+    // worktree of it; the file itself is read (and hashed) where the run works.
+    hooks = await loadHookEngine({ root: workRoot, trustRoot: repo, repoKey: handle.repoKey, runId: taskId, emit, signal: controller.signal });
+    for (const notice of hooks.notices) log(`hooks: ${notice}`);
     try {
       result = await solve({
         handle,
@@ -306,10 +319,8 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
         model,
         runId: taskId,
         signal: controller.signal,
-        emit: (event: OrchestrationEvent) => {
-          eventCount += 1;
-          writeLine({ type: "event", t: Date.now(), event });
-        },
+        emit,
+        hooks,
         budget: {
           maxTurns: options.maxTurns ?? 40,
           ...(options.timeoutMs ? { maxWallMs: options.timeoutMs } : {}),
@@ -354,6 +365,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     startedAt: startedAt.toISOString(),
     ...result,
     ...(delivery ? { delivery } : {}),
+    ...(hooks?.records.length ? { hooks: hooks.records } : {}),
   };
   writeLine({ type: "result", t: Date.now(), events: eventCount, result: json });
   await new Promise<void>((resolve) => trajectory.end(resolve));
@@ -363,7 +375,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     writeFile(path.join(outDir, "patch.diff"), result.diff),
     writeFile(
       path.join(outDir, "report.md"),
-      renderReport({ taskId, task, repo, model, result, verifyCommands, exitCode }),
+      renderReport({ taskId, task, repo, model, result, verifyCommands, exitCode, hooks: hooks?.records }),
     ),
   ]);
 
