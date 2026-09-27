@@ -320,6 +320,20 @@ function PlanReview({ run, plan: initial }: { run: RunState; plan: RunPlan }) {
         <span className="font-mono text-[11px]" style={{ color: "var(--vb-text-dim)" }}>
           {plan.steps.length} steps, {plan.waves.length} waves
         </span>
+        {run.planVersionId && (
+          <span
+            className="ml-auto font-mono text-[10.5px]"
+            style={{ color: "var(--vb-text-faint)" }}
+            title={
+              plan !== initial
+                ? "Edited: running saves a new plan version derived from this one"
+                : `Plan version ${run.planVersionId}`
+            }
+          >
+            {run.planVersionId.slice(-6)}
+            {plan !== initial ? " · edited" : ""}
+          </span>
+        )}
       </div>
       {plan.summary && (
         <p className="px-2.5 pt-2 text-[12px] leading-relaxed" style={{ color: "var(--vb-text-mid)" }}>
@@ -363,7 +377,7 @@ function PlanReview({ run, plan: initial }: { run: RunState; plan: RunPlan }) {
           type="button"
           className="vb-btn vb-btn-primary"
           disabled={!canRun}
-          onClick={() => void runPlan(plan, run.prompt)}
+          onClick={() => void runPlan(plan, run.prompt, run.planVersionId)}
           title="Execute these steps"
         >
           Run plan

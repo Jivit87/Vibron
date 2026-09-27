@@ -237,6 +237,8 @@ export interface RunState {
   plan?: RunPlan;
   /** The plan was produced in plan mode and waits for the user to run it. */
   planAwaitingApproval: boolean;
+  /** The saved plan version the shown plan is (lib/plans). */
+  planVersionId?: string;
   orchestratorText: string;
   orchestratorThinking: string;
   agents: AgentLane[];
@@ -503,6 +505,7 @@ export function reduceRun(
         ...run,
         plan: event.plan,
         planAwaitingApproval: awaiting,
+        ...(event.versionId ? { planVersionId: event.versionId } : {}),
         status: awaiting ? run.status : "running",
         agents: event.plan.steps.map((step: PlanStep) => {
           const existing = run.agents.find((a) => a.id === step.id);

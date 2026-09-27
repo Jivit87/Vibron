@@ -21,6 +21,8 @@ export interface AgentRequest {
   mode: "auto" | "single" | "orchestrated";
   /** Execute this user-approved plan instead of planning again. */
   plan?: RunPlan;
+  /** The plan version `plan` came from; an edited plan is saved as its child. */
+  planVersionId?: string;
   model: string;
   commandPolicy: "auto" | "ask" | "never";
   editPolicy?: "auto" | "ask";

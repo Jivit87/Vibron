@@ -15,12 +15,21 @@
  *   viberon mcp list|search|install|remove|enable|disable|test …   (see cli/mcp.ts)
  *   viberon hooks list|trust|revoke [--repo <path>] [--yes] [--hash <sha256>] [--json]
  *   viberon recipe list|show|validate|run|import … (see USAGE)
+ *   viberon plan list|show|diff …  viberon experiment run|list|show|promote|undo|discard …  (see cli/plans.ts)
  *
  *   run, issues, clone, eval and recipe run also take --egress <open|allowlist|deny>.
  */
 
 import { MCP_USAGE, McpCliError, parseMcpArgs, type McpArgs } from "./mcp";
 import type { HooksArgs } from "./hooks";
+import {
+  parseExperimentArgs,
+  parsePlanArgs,
+  PLANS_USAGE,
+  PlansCliError,
+  type ExperimentArgs,
+  type PlanArgs,
+} from "./plans";
 
 export const USAGE = `Usage:
   viberon run --repo <path> (--task <text|issue-url> | --task-file <file>) [options]
@@ -63,10 +72,12 @@ ${MCP_USAGE}
   viberon recipe import <https-url|file> [--repo <path> | --global] [--force]
       validates, then saves to <repo>/.viberon/recipes (with --repo) or the global
       recipe dir ($VIBERON_RECIPES_DIR, default ~/Viberon/recipes)
+${PLANS_USAGE}
 
 Network: run, issues, clone, eval and recipe run accept --egress <open|allowlist|deny>, which pins the
 egress policy mode for the process (same as VIBERON_EGRESS_MODE); see docs/EGRESS.md.
 
+Exit codes (experiment run): 0 a winner was found, 1 no branch produced a clean change, 2 error.
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
 Exit codes (recipe run): as run. (recipe validate/import): 0 ok, 1 invalid recipe, 2 error.
 Exit codes (review): 0 reviewed, 2 error.
@@ -162,8 +173,20 @@ export interface RecipeArgs {
 
 export type { HooksArgs } from "./hooks";
 
+export type { ExperimentArgs, PlanArgs } from "./plans";
+
 export type CliArgs =
-  | RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | McpArgs | HooksArgs | RecipeArgs | { command: "help" };
+  | RunArgs
+  | ReviewArgs
+  | IssuesArgs
+  | CloneArgs
+  | EvalArgs
+  | McpArgs
+  | HooksArgs
+  | PlanArgs
+  | ExperimentArgs
+  | RecipeArgs
+  | { command: "help" };
 
 export class CliError extends Error {}
 
@@ -334,6 +357,15 @@ export function parseCliArgs(argv: string[]): CliArgs {
       throw error;
     }
   }
+  if (command === "plan" || command === "experiment") {
+    if (rest.includes("--help") || rest.includes("-h")) return { command: "help" };
+    try {
+      return command === "plan" ? parsePlanArgs(rest) : parseExperimentArgs(rest);
+    } catch (error) {
+      if (error instanceof PlansCliError) throw new CliError(error.message);
+      throw error;
+    }
+  }
   if (!(command in KNOWN)) throw new CliError(`Unknown command: ${command}`);
   if (command === "recipe") return parseRecipeArgs(rest);
   const { flags, positionals } = splitFlags(rest);
@@ -500,6 +532,17 @@ export async function main(argv: string[]): Promise<number> {
   if (args.command === "recipe") {
     const { runRecipeCommand } = await import("./recipe");
     return runRecipeCommand(args, log);
+  }
+
+  if (args.command === "plan" || args.command === "experiment") {
+    const cli = await import("./plans");
+    const io = { out: (text: string) => process.stdout.write(text), err: (text: string) => process.stderr.write(text) };
+    try {
+      return args.command === "plan" ? await cli.planCommand(args, io) : await cli.experimentCommand(args, io, log);
+    } catch (error) {
+      log(`${args.command} failed: ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
   }
 
   if (args.command === "run") {

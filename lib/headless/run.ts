@@ -20,7 +20,9 @@ import { parseIssueItemUrl } from "@/lib/git-providers/detect";
 import { fetchGitHubIssue, parseGitHubIssueUrl } from "@/lib/github";
 import type { SolveOptions, SolveResult, SolveStatus } from "@/lib/harness/solve-types";
 import { renderReport } from "@/lib/headless/report";
-import { createWorktree, removeWorktree } from "@/lib/headless/worktree";
+import { createWorktree, removeWorktree, type WorktreeOptions } from "@/lib/headless/worktree";
+
+export { createWorktree, removeWorktree, type WorktreeOptions } from "@/lib/headless/worktree";
 import { loadHookEngine, type HookEngine } from "@/lib/hooks/engine";
 import type { HookRunRecord } from "@/lib/hooks/types";
 import { registerLocalWorkspace } from "@/lib/local-disk-workspace";
@@ -41,6 +43,14 @@ export interface HeadlessOptions {
   /** Run in a detached `git worktree` of HEAD; the original checkout is untouched. */
   worktree?: boolean;
   keepWorktree?: boolean;
+  /** With `worktree`: check out this tree instead of HEAD, and link dependency dirs (see `createWorktree`). */
+  worktreeOptions?: WorktreeOptions;
+  /** Every orchestration event, as it is written to the trajectory. */
+  onEvent?: (event: OrchestrationEvent) => void;
+  /** Write a fix note to the repo's memory afterwards (default true). */
+  recordMemory?: boolean;
+  /** Running inside the app server (experiments): leave the store mode alone. */
+  embedded?: boolean;
   out?: string;
   testCmd?: string;
   noGate?: boolean;
@@ -224,7 +234,8 @@ async function defaultModel(): Promise<string> {
 }
 
 export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps = {}): Promise<HeadlessOutcome> {
-  process.env.VIBERON_STORE ??= "memory";
+  // Inside the app server the store is the app's own; only a bare process defaults to memory.
+  if (!options.embedded) process.env.VIBERON_STORE ??= "memory";
   const log = options.log ?? (() => {});
   const startedAt = new Date();
   const taskId = options.taskId ?? newTaskId();
@@ -248,7 +259,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     if (!existsSync(repo) || !statSync(repo).isDirectory()) throw new Error(`Repository not found: ${repo}`);
     task = await resolveTask(options, deps.fetchIssue);
     if (options.worktree) {
-      workRoot = await createWorktree(repo, taskId);
+      workRoot = await createWorktree(repo, taskId, options.worktreeOptions);
       log(`worktree: ${workRoot}`);
     }
 
@@ -297,6 +308,13 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
     const emit = (event: OrchestrationEvent) => {
       eventCount += 1;
       writeLine({ type: "event", t: Date.now(), event });
+      if (options.onEvent) {
+        try {
+          options.onEvent(event);
+        } catch {
+          // An observer must never break the run it watches.
+        }
+      }
     };
     // Trust belongs to the repository the user named, not to a temporary
     // worktree of it; the file itself is read (and hashed) where the run works.
@@ -370,7 +388,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
   ]);
 
   // Run memory: the next task on the same area sees what was fixed and why.
-  if (result.status !== "error" && result.filesChanged.length) {
+  if (options.recordMemory !== false && result.status !== "error" && result.filesChanged.length) {
     try {
       recordFixNote(options.worktree ? repo : workRoot, {
         issue: task,

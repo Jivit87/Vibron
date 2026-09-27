@@ -302,7 +302,7 @@ function pickBest(attempts: AttemptRecord[]): AttemptRecord | null {
   });
 }
 
-function toReport(command: string, kind: VerifyCommand["kind"], outcome: Outcome | null | undefined): VerificationReport | null {
+export function toReport(command: string, kind: VerifyCommand["kind"], outcome: Outcome | null | undefined): VerificationReport | null {
   if (!outcome) return null;
   const count = (o: string) => Object.values(outcome.tests).filter((t) => t === o).length;
   const parsed = Object.keys(outcome.tests).length > 0;

@@ -46,6 +46,8 @@ import type { ImageAttachment } from "@/lib/composer/types";
 import { loadHookEngine, type HookEngine } from "@/lib/hooks/engine";
 import { ASSIGNABLE_ROLES, getRole, ROLES, type RoleId } from "@/lib/agents/roles";
 import { guessIntent } from "@/lib/agents/intent";
+import { createPlanRecorder } from "@/lib/plans/recorder";
+import { planStoreFor, type PlanStore } from "@/lib/plans/store";
 import { describeRules, loadRules, type RulesBundle } from "@/lib/agents/rules";
 import {
   computeWaves,
@@ -98,6 +100,19 @@ export interface OrchestrationInput {
    * when absent; null disables hooks.
    */
   hooks?: HookEngine | null;
+  /**
+   * The plan version this run starts from (plan-mode approval, a re-run, or
+   * an experiment variant). An unchanged plan runs as that version; an
+   * edited one becomes a new version whose parent it is.
+   */
+  planVersionId?: string;
+  /**
+   * Where plan versions are saved. Defaults to `<workspace>/.viberon/plans`;
+   * null turns versioning off (workspaces that are not on disk have none).
+   */
+  planStore?: PlanStore | null;
+  /** Tags the recorded outcome when this run is an experiment branch. */
+  experiment?: { id: string; branchId: string };
 }
 
 /* ----------------------------- plan tool ---------------------------------- */
@@ -290,8 +305,34 @@ export function renormalizePlan(plan: RunPlan): RunPlan {
   });
 }
 
+/**
+ * Run one orchestration. Every plan it shows or executes is saved as a plan
+ * version (lib/plans), and the run's outcome is recorded on the version it
+ * executed.
+ */
 export async function orchestrate(input: OrchestrationInput): Promise<void> {
   const runId = input.runId ?? randomUUID();
+  const store = input.planStore !== undefined ? input.planStore : planStoreFor(input.handle.rootPath);
+  const recorder = store
+    ? await createPlanRecorder({
+        store,
+        prompt: input.request,
+        runId,
+        parentId: input.planVersionId ?? null,
+        approved: Boolean(input.plan),
+        ...(input.experiment ? { experiment: input.experiment } : {}),
+      }).catch(() => null)
+    : null;
+  if (!recorder) return runOrchestration({ ...input, runId });
+  try {
+    await runOrchestration({ ...input, runId, emit: recorder.wrap(input.emit) });
+  } finally {
+    await recorder.flush();
+  }
+}
+
+async function runOrchestration(input: OrchestrationInput & { runId: string }): Promise<void> {
+  const runId = input.runId;
   const startedAt = Date.now();
   const ledger = new ContextLedger();
   const interaction = input.interaction ?? "agent";

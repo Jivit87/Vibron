@@ -19,6 +19,7 @@ import {
   ArrowRight,
   Brain,
   FileCode2,
+  GitFork,
   Hash,
   Layers,
   MessageSquare,
@@ -189,6 +190,16 @@ export function CommandPalette() {
         run: () => {
           store.setAppMode("ide");
           store.setSidebarView("changes");
+        },
+      },
+      {
+        id: "view.plans",
+        label: "Plans & experiments",
+        hint: "Plan versions, re-runs, and experiment branches",
+        icon: <GitFork className="size-3.5" />,
+        run: () => {
+          store.setAppMode("ide");
+          store.setSidebarView("plans");
         },
       },
       {

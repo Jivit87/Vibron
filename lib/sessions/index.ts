@@ -36,7 +36,7 @@ function build(): Holder {
     isRunLive: (runId) => Boolean(getRun(runId)),
     worktrees: {
       rootFor: async (repoKey) => (await getLocalWorkspace(repoKey))?.rootPath ?? null,
-      create: (repoRoot, name) => createWorktree(repoRoot, name, "An isolated session"),
+      create: (repoRoot, name) => createWorktree(repoRoot, name, { label: "An isolated session" }),
       register: async (dir) => (await registerLocalWorkspace(dir)).repoKey,
       remove: removeWorktree,
     },
