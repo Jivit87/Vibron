@@ -30,7 +30,7 @@ import {
   type AiUsage,
 } from "@/lib/ai/types";
 import { buildSkeleton, ContextLedger, type EngineInput } from "@/lib/context/engine";
-import { renderMemoryPrompt, renderMemoryMarkdown, saveMemory } from "@/lib/memory";
+import { commitMemory, renderMemoryPrompt, renderMemoryMarkdown, snapshotMemory } from "@/lib/memory";
 import type { ProjectMemory } from "@/lib/memory/types";
 import { isToolFailure, runTool, toolDefs } from "@/lib/tools/registry";
 import type { ToolContext } from "@/lib/tools/registry";
@@ -296,6 +296,9 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
   const interaction = input.interaction ?? "agent";
 
   let memory = await refreshMemory(input.handle);
+  // What this run loaded: its own memory writes are the delta from here,
+  // merged (never blindly saved) so concurrent sessions keep theirs.
+  let memoryBase = snapshotMemory(memory);
   let engine = await buildEngine(input.handle, memory, ledger);
   const rules =
     input.rules ?? (await loadRules(input.handle).catch(() => ({ files: [], text: "" })));
@@ -389,7 +392,7 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
     intent: "ask" | "build" | null = null,
     status: RunStatus = "done",
   ) =>
-    finalize(input, memory, startedAt, changedFiles.size, totalCost, summary, intent, status);
+    finalize(input, memoryBase, memory, startedAt, changedFiles.size, totalCost, summary, intent, status);
 
   input.emit({
     type: "run_start",
@@ -620,7 +623,8 @@ export async function orchestrate(input: OrchestrationInput): Promise<void> {
       input.emit({ type: "wave_end", wave: waveIndex });
 
       // Re-index between waves so the next wave sees the new code.
-      memory = await refreshMemory(input.handle);
+      memory = await refreshMemory(input.handle, { base: memoryBase, local: memory });
+      memoryBase = snapshotMemory(memory);
       engine = await buildEngine(input.handle, memory, ledger);
       emitLedger();
     }
@@ -1078,6 +1082,7 @@ export function ensureSubstantiveSummary(
 
 async function finalize(
   input: OrchestrationInput,
+  memoryBase: ProjectMemory,
   memory: ProjectMemory,
   startedAt: number,
   filesChanged: number,
@@ -1088,8 +1093,8 @@ async function finalize(
 ): Promise<void> {
   memory.stats.turns += 1;
   memory.stats.costUsd += costUsd;
-  await saveMemory(memory);
-  await writeMemoryMirror(input.handle, renderMemoryMarkdown(memory));
+  const saved = await commitMemory(memoryBase, memory);
+  await writeMemoryMirror(input.handle, renderMemoryMarkdown(saved));
 
   const cancelled = input.signal?.aborted ?? false;
   input.emit({

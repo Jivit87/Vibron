@@ -10,10 +10,8 @@
  * `solve` is injectable so the CLI, eval runner and tests share this path.
  */
 
-import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { OrchestrationEvent } from "@/lib/agents/events";
@@ -21,6 +19,7 @@ import type { DeliverOptions, DeliverResult, reportOnIssue } from "@/lib/deliver
 import { fetchGitHubIssue, parseGitHubIssueUrl } from "@/lib/github";
 import type { SolveOptions, SolveResult, SolveStatus } from "@/lib/harness/solve-types";
 import { renderReport } from "@/lib/headless/report";
+import { createWorktree, removeWorktree } from "@/lib/headless/worktree";
 import { loadHookEngine, type HookEngine } from "@/lib/hooks/engine";
 import type { HookRunRecord } from "@/lib/hooks/types";
 import { registerLocalWorkspace } from "@/lib/local-disk-workspace";
@@ -159,22 +158,6 @@ export async function resolveTask(
     task = `${issue.title}\n\n${issue.body}\n\n(Issue: ${issue.url})`;
   }
   return task;
-}
-
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
-}
-
-async function createWorktree(repo: string, taskId: string): Promise<string> {
-  try {
-    git(repo, ["rev-parse", "--verify", "HEAD"]);
-  } catch {
-    throw new Error("--worktree needs a git repository with at least one commit.");
-  }
-  const base = await mkdtemp(path.join(os.tmpdir(), "viberon-wt-"));
-  const dir = path.join(base, taskId);
-  git(repo, ["worktree", "add", "--detach", dir, "HEAD"]);
-  return dir;
 }
 
 function issueFromTask(task: string | undefined): string | undefined {
@@ -394,11 +377,7 @@ export async function runHeadless(options: HeadlessOptions, deps: HeadlessDeps =
   }
 
   if (options.worktree && workRoot !== repo && !options.keepWorktree) {
-    try {
-      git(repo, ["worktree", "remove", "--force", workRoot]);
-    } catch {
-      log(`could not remove worktree ${workRoot}`);
-    }
+    if (!(await removeWorktree(repo, workRoot))) log(`could not remove worktree ${workRoot}`);
   }
 
   return { exitCode, outDir, result: json };

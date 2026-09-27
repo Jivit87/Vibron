@@ -15,6 +15,7 @@
 
 import path from "node:path";
 
+import { withKeyedLock } from "@/lib/concurrency/keyed-mutex";
 import type { Graph, StoredRawFile } from "@/lib/graph";
 import {
   getLocalWorkspace,
@@ -34,7 +35,14 @@ import {
 } from "@/lib/local-disk-workspace";
 import { indexWorkspaceFiles } from "@/lib/workspace/graph-index";
 import { countTokens } from "@/lib/tokens";
-import { deriveMemory, importLegacyEntries, loadMemory, saveMemory } from "@/lib/memory";
+import {
+  deriveMemory,
+  importLegacyEntries,
+  loadMemory,
+  mergeMemory,
+  saveMemory,
+  withMemoryLock,
+} from "@/lib/memory";
 import type { ProjectMemory } from "@/lib/memory/types";
 import { LspManager } from "@/lib/lsp";
 
@@ -144,10 +152,15 @@ export async function deleteFile(
       return false;
     }
   } else {
-    const all = await getRawFiles(handle.repoKey);
-    const next = all.filter((f) => f.path !== filePath);
-    if (next.length === all.length) return false;
-    await putRawFiles(handle.repoKey, next);
+    // Same lock as `patchWorkspaceFile`: the raw list is shared by sessions.
+    const removed = await withKeyedLock("workspace-files", handle.repoKey, async () => {
+      const all = await getRawFiles(handle.repoKey);
+      const next = all.filter((f) => f.path !== filePath);
+      if (next.length === all.length) return false;
+      await putRawFiles(handle.repoKey, next);
+      return true;
+    });
+    if (!removed) return false;
   }
   await patchGraphForFile(handle, filePath, null);
   return true;
@@ -214,10 +227,13 @@ export async function fullReindex(
     handle.rootPath ? Promise.resolve() : putRawFiles(handle.repoKey, files),
   ]);
 
-  const memory = await loadMemory(handle.repoKey);
-  deriveMemory(memory, files, parsed.graph);
-  if (handle.rootPath) importLegacyEntries(handle.rootPath, memory);
-  await saveMemory(memory);
+  const memory = await withMemoryLock(handle.repoKey, async () => {
+    const loaded = await loadMemory(handle.repoKey);
+    deriveMemory(loaded, files, parsed.graph);
+    if (handle.rootPath) importLegacyEntries(handle.rootPath, loaded);
+    await saveMemory(loaded);
+    return loaded;
+  });
 
   return { graph: parsed.graph, memory };
 }
@@ -225,18 +241,24 @@ export async function fullReindex(
 /**
  * Refresh derived memory without a full graph re-parse. Cheap enough to run
  * at the end of every agent turn.
+ *
+ * `pending` is a run's working copy and the base it loaded: its learned
+ * entries are merged in first (`mergeMemory`), so re-deriving between waves
+ * neither drops what the run recorded nor overwrites what a concurrent
+ * session saved. The read-derive-save runs under the memory lock.
  */
 export async function refreshMemory(
   handle: WorkspaceHandle,
+  pending?: { base: ProjectMemory; local: ProjectMemory },
 ): Promise<ProjectMemory> {
-  const [files, graph, memory] = await Promise.all([
-    listFiles(handle),
-    getGraph(handle.repoKey),
-    loadMemory(handle.repoKey),
-  ]);
-  deriveMemory(memory, files, graph);
-  await saveMemory(memory);
-  return memory;
+  const [files, graph] = await Promise.all([listFiles(handle), getGraph(handle.repoKey)]);
+  return withMemoryLock(handle.repoKey, async () => {
+    const stored = await loadMemory(handle.repoKey);
+    const memory = pending ? mergeMemory(stored, pending.base, pending.local) : stored;
+    deriveMemory(memory, files, graph);
+    await saveMemory(memory);
+    return memory;
+  });
 }
 
 /** Mirror memory to `.viberon/MEMORY.md` so humans can read it too. */

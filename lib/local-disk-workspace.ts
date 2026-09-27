@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import { withKeyedLock } from "@/lib/concurrency/keyed-mutex";
 import type { LocalWorkspaceMeta, StoredRawFile } from "@/lib/graph";
 import { repoKey as makeRepoKey } from "@/lib/ids";
 import { countTokens } from "@/lib/tokens";
@@ -258,7 +259,27 @@ async function persistWorkspaceFiles(
  * Re-parses only that file and splices it into the stored graph, raw-file
  * list and token index. No directory scan, no whole-repo parse.
  */
-export async function patchWorkspaceFile(
+/**
+ * Patch the graph, raw-file list and token index for one written file.
+ *
+ * Every step is a read-modify-write of a whole-workspace blob, so the body
+ * runs under a per-workspace lock: two sessions writing different files at
+ * once must not each load the same list and have the second save drop the
+ * first's file (for store workspaces that list *is* the file contents).
+ */
+export function patchWorkspaceFile(
+  repoKey: string,
+  rootPath: string | null,
+  repoRef: string,
+  filePath: string,
+  source: string | null,
+): Promise<void> {
+  return withKeyedLock("workspace-files", repoKey, () =>
+    patchWorkspaceFileLocked(repoKey, rootPath, repoRef, filePath, source),
+  );
+}
+
+async function patchWorkspaceFileLocked(
   repoKey: string,
   rootPath: string | null,
   repoRef: string,

@@ -4,6 +4,8 @@ interface ViberonElectronAPI {
   openFolder: () => Promise<{ canceled: boolean; path?: string }>;
   newWindow: () => Promise<void>;
   openTerminal: (cwd?: string) => Promise<void>;
+  /** Native OS notification (added by the preload; optional until then). */
+  notify?: (input: { title: string; body?: string }) => void | Promise<void>;
 }
 
 interface Window {

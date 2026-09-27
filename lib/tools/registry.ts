@@ -40,7 +40,8 @@ import {
 import { findSymbols, renderView, searchTerms } from "@/lib/tools/navigate";
 import type { FinishInput } from "@/lib/harness/gate";
 import { isFullSuiteCommand } from "@/lib/harness/recovery";
-import type { ApprovalAsk } from "@/lib/harness/runs";
+import { lockOwnerForRun, type ApprovalAsk } from "@/lib/harness/runs";
+import { claimFile, lockConflictMessage, lockScope } from "@/lib/sessions/file-locks";
 import { runRunCommand, startRunCommand } from "@/lib/harness/workspace-services";
 import {
   createDirectory,
@@ -178,6 +179,20 @@ export function inScope(ctx: Pick<ToolContext, "writeScope">, rawPath: string): 
     if (dir !== null) return path.startsWith(`${dir}/`);
     return pattern.includes("*") && matchGlob(path, pattern);
   });
+}
+
+/**
+ * The workspace-level half of the write lock: `inScope` keeps parallel agents
+ * of one run apart, this keeps concurrent *sessions* apart. The first session
+ * to write a file holds it until its run ends; any other session's write is
+ * refused with a message naming the holder. Returns the refusal, or null.
+ */
+export function claimWrite(ctx: Pick<ToolContext, "handle" | "runId">, rawPath: string): string | null {
+  if (!ctx.runId) return null;
+  const owner = lockOwnerForRun(ctx.runId);
+  if (!owner) return null;
+  const claim = claimFile(lockScope(ctx.handle), normalizePath(rawPath), owner);
+  return claim.ok ? null : lockConflictMessage(rawPath, claim.holder);
 }
 
 /**
@@ -414,6 +429,8 @@ async function writeWhole(ctx: ToolContext, path: string, content: string, summa
   if (!inScope(ctx, path)) {
     return `Refused: ${path} is outside your assigned scope (${ctx.writeScope?.join(", ")}). Another agent owns it — report what you need instead of editing it.`;
   }
+  const locked = claimWrite(ctx, path);
+  if (locked) return locked;
 
   const before = await readFile(ctx.handle, path);
   // An existing file keeps its line endings and BOM.
@@ -495,6 +512,8 @@ const appendFileTool: ToolImpl = {
     if (!inScope(ctx, path)) {
       return `Refused: ${path} is outside your assigned scope (${ctx.writeScope?.join(", ")}). Another agent owns it — report what you need instead of editing it.`;
     }
+    const locked = claimWrite(ctx, path);
+    if (locked) return locked;
     const before = await readFile(ctx.handle, path);
     const { text, style } = before === null ? { text: "", style: null } : splitStyle(before);
     const joined = text && !text.endsWith("\n") ? `${text}\n${content}` : `${text}${content}`;
@@ -568,6 +587,8 @@ const multiEditTool: ToolImpl = {
     if (!inScope(ctx, path)) {
       return `Refused: ${path} is outside your assigned scope. Report what you need instead of editing it.`;
     }
+    const locked = claimWrite(ctx, path);
+    if (locked) return locked;
     const before = await readFile(ctx.handle, path);
     if (before === null) return `Error: file not found (${path}).`;
 
@@ -680,6 +701,8 @@ const editFileTool: ToolImpl = {
     if (!inScope(ctx, path)) {
       return `Refused: ${path} is outside your assigned scope. Report what you need instead of editing it.`;
     }
+    const locked = claimWrite(ctx, path);
+    if (locked) return locked;
 
     const before = await readFile(ctx.handle, path);
     if (before === null) return `Error: file not found (${path}).`;
@@ -784,6 +807,8 @@ const deleteFileTool: ToolImpl = {
     const path = str(args.path).trim();
     if (!path) return "Error: `path` is required.";
     if (!inScope(ctx, path)) return `Refused: ${path} is outside your scope.`;
+    const locked = claimWrite(ctx, path);
+    if (locked) return locked;
     const before = await readFile(ctx.handle, path);
     const declined = await approveEdit(
       ctx,
@@ -829,6 +854,10 @@ const renameFileTool: ToolImpl = {
     // A rename deletes `from`, so both ends must be in scope.
     for (const path of [from, to]) {
       if (!inScope(ctx, path)) return `Refused: ${path} is outside your scope.`;
+    }
+    for (const path of [from, to]) {
+      const locked = claimWrite(ctx, path);
+      if (locked) return locked;
     }
     const before = await readFile(ctx.handle, from);
     const declined = await approveEdit(
