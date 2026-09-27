@@ -18,6 +18,7 @@ import path from "node:path";
 
 import type { OrchestrationEvent } from "@/lib/agents/events";
 import type { DeliverOptions, DeliverResult, reportOnIssue } from "@/lib/deliver";
+import { parseIssueItemUrl } from "@/lib/git-providers/detect";
 import { fetchGitHubIssue, parseGitHubIssueUrl } from "@/lib/github";
 import type { SolveOptions, SolveResult, SolveStatus } from "@/lib/harness/solve-types";
 import { renderReport } from "@/lib/headless/report";
@@ -145,16 +146,22 @@ function newTaskId(): string {
   return `run-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Task text from --task / --task-file; a GitHub issue URL is fetched. */
+/** A GitHub, GitLab or Bitbucket issue URL (hosted GitLab: gitlab.com or any `/-/issues/N` URL). */
+const isIssueUrl = (value: string) => Boolean(parseGitHubIssueUrl(value) || parseIssueItemUrl(value));
+
+/** Task text from --task / --task-file; an issue URL (GitHub, GitLab, Bitbucket) is fetched. */
 export async function resolveTask(
   options: Pick<HeadlessOptions, "task" | "taskFile">,
-  fetchIssue: (url: string) => ReturnType<typeof fetchGitHubIssue> = async (url) =>
-    fetchGitHubIssue(url, fetch, await resolveGithubToken()),
+  fetchIssue: (url: string) => ReturnType<typeof fetchGitHubIssue> = async (url) => {
+    if (parseGitHubIssueUrl(url)) return fetchGitHubIssue(url, fetch, await resolveGithubToken());
+    const { fetchItemSummary } = await import("@/lib/git-providers/factory");
+    return fetchItemSummary(url);
+  },
 ): Promise<string> {
   let task = options.task?.trim() ?? "";
   if (!task && options.taskFile) task = (await readFile(options.taskFile, "utf8")).trim();
   if (!task) throw new Error("A task is required (--task or --task-file).");
-  if (parseGitHubIssueUrl(task)) {
+  if (isIssueUrl(task)) {
     const issue = await fetchIssue(task);
     task = `${issue.title}\n\n${issue.body}\n\n(Issue: ${issue.url})`;
   }
@@ -178,7 +185,7 @@ async function createWorktree(repo: string, taskId: string): Promise<string> {
 }
 
 function issueFromTask(task: string | undefined): string | undefined {
-  return task && parseGitHubIssueUrl(task.trim()) ? task.trim() : undefined;
+  return task && isIssueUrl(task.trim()) ? task.trim() : undefined;
 }
 
 /** Deliver a resolved run (and report on the issue); failures are returned, never thrown. */

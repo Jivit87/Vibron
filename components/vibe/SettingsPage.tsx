@@ -11,6 +11,7 @@ import { toast } from "sonner";
 
 import { useViberon, type AppSettings } from "@/store/viberon";
 import { cx, Segmented, SettingRow as Row, Switch } from "@/components/vibe/primitives";
+import { GitHostSettings } from "@/components/vibe/GitHostSettings";
 import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
 import { McpMarketplace } from "@/components/vibe/McpMarketplace";
 import { HooksSettings } from "@/components/vibe/HooksSettings";
@@ -224,8 +225,9 @@ export function SettingsPage() {
               )}
             </Section>
 
-            <Section id="integrations" title="Integrations" hint="MCP servers available to every workspace. Tokens stay on this machine.">
+            <Section id="integrations" title="Integrations" hint="MCP servers and git hosts available to every workspace. Tokens stay on this machine.">
               <GithubMcpSettings show={show} />
+              <GitHostSettings show={show} />
             </Section>
 
             <Section

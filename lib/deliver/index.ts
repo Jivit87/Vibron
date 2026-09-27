@@ -8,9 +8,11 @@
  *    (`expectedFiles`), and never `.github/workflows/**` unless the user
  *    re-confirmed (`allowWorkflowChanges`), Open SWE's human-approval rule.
  *  - Every check runs before anything is mutated.
- *  - git runs with an argv (no shell). The token reaches git only through
- *    `gitAuthEnv` (env config, github.com only), never a URL or argv, and is
- *    redacted from any git output we report.
+ *  - git runs with an argv (no shell). Credentials reach git only through
+ *    the provider's `gitAuthEnv` (env config, scoped to the repository's own
+ *    host), never a URL or argv, and are redacted from any git output we report.
+ *  - GitHub, GitLab and Bitbucket remotes all work: the host API goes
+ *    through lib/git-providers (a GitLab merge request is the "PR").
  *  - A failed push leaves the local branch and commit in place and says why.
  */
 
@@ -21,17 +23,11 @@ import path from "node:path";
 
 import { DeliverError } from "@/lib/deliver/errors";
 import { configuredRemoteUrl, runGit } from "@/lib/git";
-import {
-  createPullRequest,
-  findOpenPullRequest,
-  getDefaultBranch,
-  parseRemote,
-  updatePullRequest,
-  type ApiOptions,
-  type RepoId,
-} from "@/lib/github-api";
+import { providerFor, providerForRemote } from "@/lib/git-providers/factory";
+import { githubRepo } from "@/lib/git-providers/github";
+import type { GitProvider, RepoLocator } from "@/lib/git-providers/interface";
+import type { RepoId } from "@/lib/github-api";
 import { scrubEnv } from "@/lib/terminal/safety";
-import { gitAuthEnv, resolveGithubToken } from "@/lib/workspace/clone";
 
 export * from "@/lib/deliver/ci";
 export * from "@/lib/deliver/report";
@@ -78,9 +74,15 @@ function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
-function redact(text: string, token: string | null): string {
-  return token ? text.split(token).join("***") : text;
+function redact(text: string, secrets: string[]): string {
+  return secrets.filter(Boolean).reduce((out, secret) => out.split(secret).join("***"), text);
 }
+
+const NO_CREDENTIALS: Record<GitProvider["platform"], string> = {
+  github: "No GitHub token. Connect GitHub in Settings → Integrations (or set GITHUB_TOKEN).",
+  gitlab: "No GitLab token for this instance. Add one in Settings → Integrations (or set GITLAB_TOKEN and GITLAB_URL).",
+  bitbucket: "No Bitbucket credentials. Add an app password or access token in Settings → Integrations (or set BITBUCKET_TOKEN).",
+};
 
 /** git with the token in env config only; the rest of the environment is scrubbed. */
 function gitWithAuth(
@@ -155,8 +157,11 @@ export interface DeliverOptions {
   branch?: string;
   /** Remote name or URL to push to. Default "origin". */
   remote?: string;
-  /** The GitHub repo for the PR; default: parsed from the remote URL. */
+  /** The host API to open the PR with; default: detected from the remote URL. */
+  provider?: GitProvider;
+  /** A GitHub repo for the PR (when the remote URL does not say); ignored with `provider`. */
   repo?: RepoId;
+  /** Overrides the stored credential for the detected host; null: none. */
   token?: string | null;
   fetchImpl?: typeof fetch;
 }
@@ -168,6 +173,8 @@ export interface DeliverResult {
   prNumber: number;
   /** false when an open PR for the branch was updated instead. */
   created: boolean;
+  /** The host the PR was opened on. */
+  platform?: GitProvider["platform"];
 }
 
 export async function deliver(options: DeliverOptions): Promise<DeliverResult> {
@@ -212,14 +219,16 @@ export async function deliver(options: DeliverOptions): Promise<DeliverResult> {
 
   // 2. Where it goes (all checked before anything is mutated).
   const url = await remoteUrl(root, remote);
-  const repo = options.repo ?? parseRemote(url);
-  if (!repo) throw new DeliverError(`The remote "${remote}" is not a GitHub repository.`, "not_github", 400);
-  const token = options.token === undefined ? await resolveGithubToken() : options.token;
-  if (!token) {
-    throw new DeliverError("No GitHub token. Connect GitHub in Settings → Integrations (or set GITHUB_TOKEN).", "no_token", 401);
+  const resolve = { token: options.token, fetchImpl: options.fetchImpl };
+  const provider =
+    options.provider ??
+    (options.repo ? await providerFor(githubRepo(options.repo), resolve) : await providerForRemote(url, resolve));
+  if (!provider) {
+    throw new DeliverError(`The remote "${remote}" is not a GitHub, GitLab or Bitbucket repository.`, "not_github", 400);
   }
-  const api: ApiOptions = { token, fetchImpl: options.fetchImpl };
-  const auth = gitAuthEnv(token, url);
+  if (!provider.authenticated) throw new DeliverError(NO_CREDENTIALS[provider.platform], "no_token", 401);
+  const secrets = provider.secrets();
+  const auth = provider.gitAuthEnv(url);
 
   let branch: string;
   if (options.branch) {
@@ -232,7 +241,7 @@ export async function deliver(options: DeliverOptions): Promise<DeliverResult> {
   } else {
     branch = onDeliveryBranch ? current : branchName(title, await existingBranches(root, remote, auth));
   }
-  const base = options.baseBranch?.trim() || (await getDefaultBranch(repo, api));
+  const base = options.baseBranch?.trim() || (await provider.getDefaultBranch());
 
   // 3. Branch and commit locally.
   if (branch !== current) await runGit(root, ["switch", "-c", branch]);
@@ -246,7 +255,7 @@ export async function deliver(options: DeliverOptions): Promise<DeliverResult> {
   // 4. Push; on failure the local branch and commit stay.
   const push = await gitWithAuth(root, ["push", remote, `HEAD:refs/heads/${branch}`], auth);
   if (push.code !== 0) {
-    const reason = redact(push.output, token).split("\n").slice(-4).join(" ").slice(0, 500);
+    const reason = redact(push.output, secrets).split("\n").slice(-4).join(" ").slice(0, 500);
     throw new DeliverError(
       `Push to ${remote} failed: ${reason || `exit ${push.code}`}. Commit ${commit.slice(0, 12)} is on local branch ${branch}; fix the cause and deliver again.`,
       "push_failed",
@@ -255,12 +264,12 @@ export async function deliver(options: DeliverOptions): Promise<DeliverResult> {
     );
   }
 
-  // 5. Open or update the PR.
-  const existing = await findOpenPullRequest(repo, branch, api);
+  // 5. Open or update the PR (on GitLab, the merge request).
+  const existing = await provider.findOpenPullRequest(branch);
   const pr = existing
-    ? await updatePullRequest({ ...repo, number: existing.number }, { title, body: options.body }, api)
-    : await createPullRequest(repo, { title, body: options.body, head: branch, base, draft: options.draft ?? true }, api);
-  return { branch, commit, prUrl: pr.html_url, prNumber: pr.number, created: !existing };
+    ? await provider.updatePullRequest(existing.number, { title, body: options.body })
+    : await provider.createPullRequest({ title, body: options.body, head: branch, base, draft: options.draft ?? true });
+  return { branch, commit, prUrl: pr.url, prNumber: pr.number, created: !existing, platform: provider.platform };
 }
 
 /* --------------------------- isolated issue work --------------------------- */
@@ -270,7 +279,7 @@ export interface IssueWorktree {
   dir: string;
   /** Default branch the work starts from (and the PR targets). */
   base: string;
-  repo: RepoId;
+  repo: RepoLocator;
 }
 
 /**
@@ -283,19 +292,20 @@ export async function createIssueWorktree(
   options: { token?: string | null; fetchImpl?: typeof fetch } = {},
 ): Promise<IssueWorktree> {
   const url = await remoteUrl(root, "origin");
-  const repo = parseRemote(url);
-  if (!repo) throw new DeliverError("The origin remote is not a GitHub repository.", "no_github_remote", 400);
-  const token = options.token === undefined ? await resolveGithubToken() : options.token;
-  const base = await getDefaultBranch(repo, { token, fetchImpl: options.fetchImpl });
+  const provider = await providerForRemote(url, { token: options.token, fetchImpl: options.fetchImpl });
+  if (!provider) {
+    throw new DeliverError("The origin remote is not a GitHub, GitLab or Bitbucket repository.", "no_github_remote", 400);
+  }
+  const base = await provider.getDefaultBranch();
   if (!/^[\w./-]+$/.test(base) || base.startsWith("-")) throw new DeliverError(`Unexpected default branch "${base}".`, "invalid_input", 400);
 
-  const fetched = await gitWithAuth(root, ["fetch", "--quiet", "origin", `refs/heads/${base}:refs/remotes/origin/${base}`], gitAuthEnv(token, url));
+  const fetched = await gitWithAuth(root, ["fetch", "--quiet", "origin", `refs/heads/${base}:refs/remotes/origin/${base}`], provider.gitAuthEnv(url));
   if (fetched.code !== 0) {
-    throw new DeliverError(`Could not fetch origin/${base}: ${redact(fetched.output, token).slice(0, 300)}`, "fetch_failed", 502);
+    throw new DeliverError(`Could not fetch origin/${base}: ${redact(fetched.output, provider.secrets()).slice(0, 300)}`, "fetch_failed", 502);
   }
   const dir = path.join(await mkdtemp(path.join(os.tmpdir(), "viberon-issue-")), "repo");
   await runGit(root, ["worktree", "add", "--detach", dir, `refs/remotes/origin/${base}`], { timeoutMs: 120_000 });
-  return { dir, base, repo };
+  return { dir, base, repo: provider.repo };
 }
 
 /** Remove an issue worktree; its delivered branch stays in the repository. */

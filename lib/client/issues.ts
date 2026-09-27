@@ -163,8 +163,8 @@ export interface IssuesError {
 
 export const ERROR_TEXT: Record<"no_folder" | "no_github_remote" | "token" | "missing", string> = {
   no_folder: "Open a local folder or clone a repository first.",
-  no_github_remote: "This folder has no GitHub remote named origin.",
-  token: "GitHub needs a token to read this repository's issues.",
+  no_github_remote: "This folder has no GitHub, GitLab or Bitbucket remote named origin.",
+  token: "The git host needs credentials to read this repository's issues.",
   missing: "This server does not expose /api/issues yet.",
 };
 

@@ -1,6 +1,6 @@
 /**
- * Clone-to-fix: turn a repo URL, `owner/repo`, or GitHub issue URL into a
- * local, indexed disk workspace.
+ * Clone-to-fix: turn a repo URL, `owner/repo`, or an issue URL (GitHub,
+ * GitLab, Bitbucket) into a local, indexed disk workspace.
  *
  * Safety: git runs through `spawn` with an argument vector (never a shell),
  * the URL is validated against an allowlist of forms, arguments can never
@@ -14,6 +14,9 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { loadHostConfig } from "@/lib/git-providers/credentials";
+import { cloneUrlFor, detectRemote, parseItemUrl, parseRepoWebUrl, type HostConfig } from "@/lib/git-providers/detect";
+import type { GitProvider, RepoLocator } from "@/lib/git-providers/interface";
 import { fetchGitHubIssue, parseGitHubIssueUrl, type GitHubIssue } from "@/lib/github";
 import { lastIndexStats, registerLocalWorkspace } from "@/lib/local-disk-workspace";
 import { bootstrapEnvironment } from "@/lib/workspace/bootstrap";
@@ -21,10 +24,13 @@ import { bootstrapEnvironment } from "@/lib/workspace/bootstrap";
 export interface CloneTarget {
   /** What `git clone` receives. */
   cloneUrl: string;
+  /** Owner / workspace; a GitLab namespace keeps its nested groups (`g/sub`). */
   owner: string;
   name: string;
-  /** Set when the input was a GitHub issue/PR URL. */
+  /** Set when the input was an issue URL (or a GitHub PR URL). */
   issueUrl?: string;
+  /** Set for GitLab and Bitbucket repositories (GitHub keeps its original parsing). */
+  repo?: RepoLocator;
 }
 
 const SEGMENT = /^[A-Za-z0-9_.-]+$/;
@@ -45,11 +51,44 @@ function validSegments(owner: string, name: string): boolean {
 }
 
 /**
+ * GitLab / Bitbucket inputs: issue and merge/pull request URLs, repository
+ * pages (nested GitLab groups, `/-/tree/…`, `/src/…`), and remotes. https
+ * inputs become the canonical https clone URL (dropping a Bitbucket user
+ * name); ssh inputs are cloned as given.
+ */
+function parseHostedTarget(value: string, hosts: HostConfig | undefined): CloneTarget | null {
+  const item = parseItemUrl(value, hosts);
+  if (item && item.repo.platform !== "github") {
+    const { repo } = item;
+    return { cloneUrl: cloneUrlFor(repo), owner: repo.owner, name: repo.repo, repo, ...(item.kind === "issue" ? { issueUrl: value } : {}) };
+  }
+  const remote = detectRemote(value, hosts);
+  if (remote && remote.platform !== "github") {
+    if (/^https?:/i.test(value) && /^https?:/i.test(remote.baseUrl)) {
+      const web = parseRepoWebUrl(value, hosts);
+      const repo = web?.repo ?? remote;
+      return { cloneUrl: cloneUrlFor(repo), owner: repo.owner, name: repo.repo, repo };
+    }
+    return { cloneUrl: value, owner: remote.owner, name: remote.repo, repo: remote };
+  }
+  const web = parseRepoWebUrl(value, hosts);
+  if (web && web.repo.platform !== "github") {
+    return { cloneUrl: cloneUrlFor(web.repo), owner: web.repo.owner, name: web.repo.repo, repo: web.repo };
+  }
+  return null;
+}
+
+/**
  * Accepts `https://host/owner/name(.git)`, `git@host:owner/name.git`,
- * `ssh://git@host/owner/name`, `owner/name`, and GitHub issue/PR URLs.
+ * `ssh://git@host/owner/name`, `owner/name`, GitHub issue/PR URLs, and
+ * GitLab (nested groups, self-hosted via `hosts`) and Bitbucket repository,
+ * issue and merge/pull request URLs.
  * `file://` and absolute local paths only when `allowLocal` (tests, eval).
  */
-export function parseCloneTarget(input: string, options: { allowLocal?: boolean } = {}): CloneTarget | null {
+export function parseCloneTarget(
+  input: string,
+  options: { allowLocal?: boolean; hosts?: HostConfig } = {},
+): CloneTarget | null {
   const value = input.trim();
   if (!value || value.startsWith("-") || /[\s\0;&|`$<>\\]/.test(value)) return null;
 
@@ -61,6 +100,11 @@ export function parseCloneTarget(input: string, options: { allowLocal?: boolean 
       name: issue.repo,
       issueUrl: value,
     };
+  }
+
+  if (!/^[a-z+]+:\/\/[^/]*:[^/@]*@/i.test(value)) {
+    const hosted = parseHostedTarget(value, options.hosts);
+    if (hosted) return hosted;
   }
 
   const short = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(value);
@@ -143,7 +187,8 @@ export function reposDir(): string {
 }
 
 export function cloneDestination(target: CloneTarget, base = reposDir()): string {
-  return path.join(base, `${target.owner}__${target.name}`);
+  // Nested GitLab groups flatten into one directory name.
+  return path.join(base, `${target.owner.split("/").join("__")}__${target.name}`);
 }
 
 /** Run git with an argv (no shell). Streams stderr/stdout lines to `onLine`. */
@@ -213,6 +258,8 @@ export async function cloneRepository(
     onProgress?: (text: string) => void;
     /** GitHub token for https clones (see `gitAuthEnv`). */
     token?: string | null;
+    /** Prepared `GIT_CONFIG_*` auth (GitLab / Bitbucket); replaces `token`. */
+    authEnv?: Record<string, string>;
   } = {},
 ): Promise<CloneResult> {
   const dest = cloneDestination(target, options.baseDir);
@@ -221,7 +268,7 @@ export async function cloneRepository(
     throw new Error(`Invalid ref: ${options.ref}`);
   }
   const depth = options.depth && Number.isInteger(options.depth) && options.depth > 0 ? options.depth : undefined;
-  const auth = gitAuthEnv(options.token, target.cloneUrl);
+  const auth = options.authEnv ?? gitAuthEnv(options.token, target.cloneUrl);
 
   let reused = false;
   if (existsSync(path.join(dest, ".git"))) {
@@ -282,11 +329,20 @@ export async function cloneToWorkspace(
     token?: string | null;
   } = {},
 ): Promise<ClonedWorkspace> {
-  const target = parseCloneTarget(input, { allowLocal: options.allowLocal });
-  if (!target) throw new Error("Unsupported repository URL. Use https, ssh, owner/repo, or a GitHub issue URL.");
+  const hosts = await loadHostConfig().catch((): HostConfig => ({}));
+  const target = parseCloneTarget(input, { allowLocal: options.allowLocal, hosts });
+  if (!target) throw new Error("Unsupported repository URL. Use https, ssh, owner/repo, or an issue URL.");
   const progress = options.onProgress ?? (() => {});
-  const token = options.token === undefined ? await resolveGithubToken() : options.token;
-  const { rootPath, reused } = await cloneRepository(target, { ...options, token, onProgress: progress });
+  // GitLab / Bitbucket: the provider holds the host-scoped credentials. Loaded
+  // lazily: the factory itself imports this module.
+  let provider: GitProvider | null = null;
+  if (target.repo) {
+    const { providerFor } = await import("@/lib/git-providers/factory");
+    provider = await providerFor(target.repo, options.token === undefined ? {} : { token: options.token });
+  }
+  const token = provider ? null : options.token === undefined ? await resolveGithubToken() : options.token;
+  const authEnv = provider?.gitAuthEnv(target.cloneUrl);
+  const { rootPath, reused } = await cloneRepository(target, { ...options, token, authEnv, onProgress: progress });
 
   progress("Indexing code graph…");
   const label = `${target.owner}/${target.name}`;
@@ -297,8 +353,13 @@ export async function cloneToWorkspace(
   let issue: GitHubIssue | undefined;
   if (target.issueUrl) {
     progress("Fetching issue…");
+    const fetchHosted = async (url: string): Promise<GitHubIssue> => {
+      const item = parseItemUrl(url, hosts);
+      const found = await provider!.getIssue(item!.number);
+      return { title: found.title, body: found.body, url: found.url };
+    };
     try {
-      issue = await (options.fetchIssue ?? ((url: string) => fetchGitHubIssue(url, fetch, token)))(target.issueUrl);
+      issue = await (options.fetchIssue ?? (provider ? fetchHosted : (url: string) => fetchGitHubIssue(url, fetch, token)))(target.issueUrl);
     } catch (error) {
       progress(`Could not fetch the issue: ${error instanceof Error ? error.message : String(error)}`);
     }

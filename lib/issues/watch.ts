@@ -4,11 +4,12 @@
  * since a desktop app cannot receive webhooks).
  *
  * The label is the trust gate: on GitHub only people with triage rights can
- * apply labels, so a labeled issue was approved by a maintainer. Unlabeled
- * issues are never picked up automatically.
+ * apply labels (on GitLab, Reporter and up), so a labeled issue was approved
+ * by a maintainer. Bitbucket has no labels; the issue's component stands in
+ * (see docs/MULTI_GIT.md). Unlabeled issues are never picked up automatically.
  */
 
-import { listIssues } from "@/lib/github-api";
+import { parseItemUrl } from "@/lib/git-providers/detect";
 import { fixIssues, workspaceRepo } from "@/lib/issues";
 
 export interface WatchConfig {
@@ -39,7 +40,7 @@ export function validateWatch(input: { enabled?: unknown; label?: unknown; inter
   "enabled" | "label" | "intervalMinutes"
 > {
   const label = typeof input.label === "string" ? input.label.trim() : DEFAULT_WATCH.label;
-  if (!label || label.length > 50 || /[,\n]/.test(label)) throw new Error("label must be one GitHub label name (no commas).");
+  if (!label || label.length > 50 || /[,\n]/.test(label)) throw new Error("label must be one label name (no commas).");
   const minutes = Number(input.intervalMinutes ?? DEFAULT_WATCH.intervalMinutes);
   if (!Number.isInteger(minutes) || minutes < 5 || minutes > 1440) throw new Error("intervalMinutes must be a whole number from 5 to 1440.");
   return { enabled: input.enabled === true, label, intervalMinutes: minutes };
@@ -68,12 +69,12 @@ export async function checkRepo(repoKey: string, now = Date.now()): Promise<Watc
   const config = await getWatch(repoKey);
   const next: WatchConfig = { ...config, lastCheckedAt: now };
   try {
-    const { repo } = await workspaceRepo(repoKey);
-    const issues = await listIssues(repo, { labels: [config.label], limit: 30 });
+    const { provider } = await workspaceRepo(repoKey);
+    const issues = await provider.listIssues({ labels: [config.label], limit: 30 });
     const fresh = issues.map((i) => i.number).filter((n) => !config.handledIssues.includes(n));
     if (fresh.length) {
       const { tasks, skipped } = await fixIssues({ repoKey, numbers: fresh, deliver: true, source: "issue" });
-      const queued = tasks.map((t) => Number(t.issueUrl?.split("/").pop()));
+      const queued = tasks.map((t) => parseItemUrl(t.issueUrl ?? "", { gitlabBaseUrls: [provider.repo.baseUrl] })?.number ?? Number(t.issueUrl?.split("/").pop()));
       // Skipped ones are handled too: already in flight, already fixed, or closed.
       next.handledIssues = [...config.handledIssues, ...queued, ...skipped.map((s) => s.number)].slice(-500);
     }
