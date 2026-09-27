@@ -14,6 +14,9 @@ import {
   WEB_SEARCH_TOOL_DEF,
 } from "@/lib/browse";
 
+/** Deterministic DNS for the egress SSRF check: a public address. */
+const egress = { lookup: async () => ["151.101.0.223"] };
+
 describe("browse module", () => {
   describe("DEV_DOMAINS allowlist", () => {
     it("contains expected development and documentation domains", () => {
@@ -76,6 +79,7 @@ describe("browse module", () => {
 
         const result = await browseUrl("https://docs.python.org/3/library/os.html", {
           allowedDomains: ["docs.python.org"],
+          egress,
         });
 
         expect(result.status).toBe(200);
@@ -92,7 +96,7 @@ describe("browse module", () => {
       try {
         globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network connection refused"));
 
-        const result = await browseUrl("https://developer.mozilla.org/test");
+        const result = await browseUrl("https://developer.mozilla.org/test", { egress });
         expect(result.status).toBe(0);
         expect(result.error).toContain("Network connection refused");
       } finally {
@@ -111,7 +115,7 @@ describe("browse module", () => {
           text: async () => "Not Found",
         });
 
-        const result = await browseUrl("https://developer.mozilla.org/missing");
+        const result = await browseUrl("https://developer.mozilla.org/missing", { egress });
         expect(result.status).toBe(404);
         expect(result.error).toContain("404");
       } finally {
@@ -136,7 +140,7 @@ describe("browse module", () => {
           `,
         });
 
-        const output = await searchWeb("vitest testing guide", { maxResults: 5 });
+        const output = await searchWeb("vitest testing guide", { maxResults: 5, egress });
         expect(typeof output).toBe("string");
         expect(output).toContain('Search results for: "vitest testing guide"');
         expect(output).toContain("Example Title");

@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import { auditCommandEgress, checkCommandEgress } from "@/lib/egress";
 import { classifyCommand } from "@/lib/terminal/safety";
 import { excludeFromGit } from "@/lib/workspace/graph-index";
 import { execInRepo, findRepoVenv, which } from "@/lib/verify";
@@ -16,6 +17,8 @@ export interface BootstrapOptions {
   onProgress?: (text: string) => void;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Workspace whose egress policy applies ("" = the global policy). */
+  repoKey?: string;
 }
 
 function declaresExtra(root: string, name: string): boolean {
@@ -39,6 +42,14 @@ export async function bootstrapEnvironment(root: string, options: BootstrapOptio
     const verdict = classifyCommand(command);
     if (verdict.allowed === false) {
       notes.push(`${what}: refused (${verdict.reason})`);
+      return false;
+    }
+    // Nobody is around to approve an off-policy install, so "ask" refuses too.
+    const where = { repoKey: options.repoKey ?? "", rootPath: root };
+    const { verdict: net } = await checkCommandEgress(command, where);
+    if (net.action === "ask") await auditCommandEgress(net, { ...where, command, approved: false });
+    if (net.action !== "allow") {
+      notes.push(`${what}: refused by the network egress policy (${net.reason})`);
       return false;
     }
     progress(`$ ${command}`);

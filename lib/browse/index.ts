@@ -23,12 +23,18 @@
  *    can search with a query string and get back relevant snippets.
  *  - Token-budgeted: the output is capped at a configurable size
  *    (default 4000 tokens ≈ 16KB) to avoid blowing context.
- *  - Safe: only fetches from allowlisted domains in sandbox mode;
- *    never sends credentials or cookies.
+ *  - Safe: every fetch goes through the egress policy (lib/egress):
+ *    the host is checked before the request, redirects are followed by
+ *    hand and re-checked hop by hop, and private / loopback / link-local /
+ *    cloud-metadata addresses are refused unless a rule names them
+ *    (SSRF guard). Never sends credentials or cookies.
  *
  * Tool definitions at the bottom of this file are registered in the
  * tool registry alongside the existing tools.
  */
+
+import { egressFetch, type EgressFetchResult, type Lookup } from "@/lib/egress/fetch";
+import type { EffectiveEgressPolicy } from "@/lib/egress/policy";
 
 /* -------------------------------- types ---------------------------------- */
 
@@ -42,6 +48,21 @@ export interface BrowseResult {
   status: number;
   /** Error message if the fetch failed. */
   error?: string;
+  /** True when the egress policy refused a hop. */
+  blocked?: boolean;
+  /** Every URL requested, in order (redirects included), without queries. */
+  hops?: string[];
+}
+
+/** Egress context for a fetch. Omitted fields fall back to the global policy. */
+export interface BrowseEgress {
+  policy?: EffectiveEgressPolicy;
+  repoKey?: string;
+  rootPath?: string | null;
+  /** DNS seam for tests. */
+  lookup?: Lookup;
+  /** fetch seam for tests; default is the global fetch. */
+  fetchImpl?: typeof fetch;
 }
 
 export interface BrowseOptions {
@@ -51,8 +72,33 @@ export interface BrowseOptions {
   timeoutMs?: number;
   /** Extract only the main content area (skip nav, footer, etc.). */
   mainContentOnly?: boolean;
-  /** Allowed domains (when sandboxing). Null = allow all. */
+  /**
+   * Extra narrowing on top of the egress policy: only these domains (and
+   * their subdomains). Null/undefined = whatever the policy allows.
+   */
   allowedDomains?: string[] | null;
+  egress?: BrowseEgress;
+}
+
+async function policyFor(egress: BrowseEgress | undefined): Promise<EffectiveEgressPolicy> {
+  if (egress?.policy) return egress.policy;
+  const { loadEffectivePolicy } = await import("@/lib/egress/settings");
+  return loadEffectivePolicy(egress?.repoKey ?? "");
+}
+
+async function guardedFetch(
+  url: string,
+  init: RequestInit,
+  egress: BrowseEgress | undefined,
+): Promise<EgressFetchResult> {
+  return egressFetch(url, init, {
+    policy: await policyFor(egress),
+    source: "browse",
+    repoKey: egress?.repoKey,
+    rootPath: egress?.rootPath ?? null,
+    lookup: egress?.lookup,
+    fetchImpl: egress?.fetchImpl,
+  });
 }
 
 /* ------------------------------ constants -------------------------------- */
@@ -249,20 +295,46 @@ export async function browseUrl(
     }
   }
 
-  // Fetch.
+  // Fetch, re-checking the egress policy on every redirect hop.
   let response: Response;
+  let hops: string[] = [];
+  let finalUrl = url;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    response = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html, application/json, text/plain, */*",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    let fetched: EgressFetchResult;
+    try {
+      fetched = await guardedFetch(
+        url,
+        {
+          headers: {
+            "User-Agent": USER_AGENT,
+            Accept: "text/html, application/json, text/plain, */*",
+          },
+          signal: controller.signal,
+        },
+        options.egress,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    hops = fetched.hops;
+    if (fetched.ok === false) {
+      return {
+        url,
+        title: "",
+        content: "",
+        truncated: false,
+        status: 0,
+        blocked: true,
+        hops,
+        error: `Blocked by the network egress policy: ${fetched.blocked.reason}${
+          hops.length > 1 ? ` (after redirects: ${hops.join(" → ")})` : ""
+        }`,
+      };
+    }
+    response = fetched.response;
+    finalUrl = fetched.finalUrl;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -277,7 +349,8 @@ export async function browseUrl(
 
   if (!response.ok) {
     return {
-      url,
+      url: finalUrl,
+      hops,
       title: "",
       content: "",
       truncated: false,
@@ -308,7 +381,8 @@ export async function browseUrl(
       const pretty = JSON.stringify(json, null, 2);
       const truncated = pretty.length > maxChars;
       return {
-        url,
+        url: finalUrl,
+        hops,
         title: parsed.pathname,
         content: truncated ? pretty.slice(0, maxChars) + "\n[…truncated]" : pretty,
         truncated,
@@ -323,7 +397,8 @@ export async function browseUrl(
   if (contentType.includes("text/plain") || contentType.includes("text/markdown")) {
     const truncated = body.length > maxChars;
     return {
-      url,
+      url: finalUrl,
+      hops,
       title: parsed.pathname,
       content: truncated ? body.slice(0, maxChars) + "\n[…truncated]" : body,
       truncated,
@@ -335,7 +410,8 @@ export async function browseUrl(
   const { title, content } = htmlToMarkdown(body);
   const truncated = content.length > maxChars;
   return {
-    url,
+    url: finalUrl,
+    hops,
     title: title || parsed.hostname + parsed.pathname,
     content: truncated ? content.slice(0, maxChars) + "\n[…truncated]" : content,
     truncated,
@@ -350,7 +426,7 @@ export async function browseUrl(
  */
 export async function searchWeb(
   query: string,
-  options: { maxResults?: number; timeoutMs?: number } = {},
+  options: { maxResults?: number; timeoutMs?: number; egress?: BrowseEgress } = {},
 ): Promise<string> {
   const maxResults = options.maxResults ?? 5;
   const timeoutMs = options.timeoutMs ?? 10_000;
@@ -361,15 +437,20 @@ export async function searchWeb(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    response = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html",
-      },
-      redirect: "follow",
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    let fetched: EgressFetchResult;
+    try {
+      fetched = await guardedFetch(
+        url,
+        { headers: { "User-Agent": USER_AGENT, Accept: "text/html" }, signal: controller.signal },
+        options.egress,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (fetched.ok === false) {
+      return `Search blocked by the network egress policy: ${fetched.blocked.reason}`;
+    }
+    response = fetched.response;
   } catch (error) {
     return `Search failed: ${error instanceof Error ? error.message : String(error)}`;
   }

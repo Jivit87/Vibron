@@ -28,6 +28,14 @@ import { trimHeadTail } from "@/lib/terminal/output";
 import * as verify from "@/lib/verify";
 import { browseUrl, searchWeb, BROWSE_TOOL_DEF, WEB_SEARCH_TOOL_DEF } from "@/lib/browse";
 import {
+  auditCommandEgress,
+  checkCommandEgress,
+  describeFinding,
+  loadEffectivePolicy,
+  prepareProcessEgress,
+  type EffectiveEgressPolicy,
+} from "@/lib/egress";
+import {
   applyStyle,
   checkEdit,
   multiReplace,
@@ -711,6 +719,50 @@ const editFileTool: ToolImpl = {
   },
 };
 
+/**
+ * Network egress gate for a shell command (best effort: it reads the command
+ * text; the sandbox and the egress proxy are the boundary for what the
+ * process does at runtime). "block" refuses; "ask" forces a human approval
+ * even under the Auto command policy, and refuses when no one can approve.
+ */
+async function gateCommandEgress(
+  ctx: ToolContext,
+  command: string,
+): Promise<
+  { refusal: string } | { refusal: null; approved: boolean; approvedHosts: string[]; policy: EffectiveEgressPolicy }
+> {
+  const where = { repoKey: ctx.handle.repoKey, rootPath: ctx.handle.rootPath };
+  const { verdict, policy } = await checkCommandEgress(command, where);
+  if (verdict.action === "block") {
+    return {
+      refusal: `Refused by the network egress policy: ${verdict.reason}. Work offline, or ask the user to allow the host in Settings → Network.`,
+    };
+  }
+  if (verdict.action !== "ask") return { refusal: null, approved: false, approvedHosts: [], policy };
+
+  const targets = verdict.findings.filter((f) => f.action === "ask").map(describeFinding);
+  const approved = ctx.events.requestApproval
+    ? await ctx.events.requestApproval({
+        kind: "command",
+        title: command,
+        reason: `reaches the network outside the egress allowlist: ${targets.join(", ")}`,
+        detail: { command },
+        alwaysKey: `egress:${targets.join(",")}`,
+      })
+    : false;
+  await auditCommandEgress(verdict, { ...where, command, approved });
+  if (!approved) {
+    return {
+      refusal: ctx.events.requestApproval
+        ? `The user declined \`${command}\`: ${verdict.reason}. Continue without it.`
+        : `Refused by the network egress policy: ${verdict.reason}, and no one is available to approve it in this run.`,
+    };
+  }
+  // The approval also opens these hosts in the egress proxy, for this command only.
+  const approvedHosts = verdict.findings.flatMap((f) => (f.action === "ask" && f.intent.host ? [f.intent.host] : []));
+  return { refusal: null, approved: true, approvedHosts, policy };
+}
+
 const compareTool: ToolImpl = {
   def: {
     name: "compare",
@@ -731,6 +783,8 @@ const compareTool: ToolImpl = {
     if (!ctx.harness?.compare) return "Error: compare is not available in this run.";
     const verdict = classifyCommand(command);
     if (verdict.allowed === false) return `Refused: this command ${verdict.reason}.`;
+    const gate = await gateCommandEgress(ctx, command);
+    if (gate.refusal !== null) return gate.refusal;
     const timeoutMs = Math.min(900, Math.max(5, num(args.timeout_seconds) ?? 180)) * 1000;
     return ctx.harness.compare(command, timeoutMs);
   },
@@ -911,7 +965,9 @@ const runCommandTool: ToolImpl = {
     if (verdict.allowed === false) {
       return `Refused: this command ${verdict.reason}. Viberon never runs it. Choose a safer approach.`;
     }
-    if (verdict.needsApproval && ctx.commandPolicy === "ask") {
+    const gate = await gateCommandEgress(ctx, command);
+    if (gate.refusal !== null) return gate.refusal;
+    if (verdict.needsApproval && ctx.commandPolicy === "ask" && !gate.approved) {
       const approved = await ctx.events.requestApproval?.({
         kind: "command",
         title: command,
@@ -923,6 +979,15 @@ const runCommandTool: ToolImpl = {
         return `The user declined to run \`${command}\`. Continue without it, or explain why it is necessary.`;
       }
     }
+
+    const net = await prepareProcessEgress({
+      repoKey: ctx.handle.repoKey,
+      rootPath: ctx.handle.rootPath,
+      sandbox: ctx.sandbox,
+      policy: gate.policy,
+      approvedHosts: gate.approvedHosts,
+    });
+    if (net.ok === false) return `Refused: ${net.error}.`;
 
     rememberTerms(ctx, searchTerms(command));
     const background = args.background === true;
@@ -939,7 +1004,8 @@ const runCommandTool: ToolImpl = {
         runId: ctx.runId,
         origin: "agent",
         repoEnv: true,
-        sandbox: ctx.sandbox,
+        sandbox: net.sandbox,
+        egressProxy: net.egressProxy,
       });
       // Give a server a moment to bind and print its URL.
       await new Promise((resolve) => setTimeout(resolve, 3500));
@@ -966,7 +1032,8 @@ const runCommandTool: ToolImpl = {
       repoEnv: true,
       // Collect generously; `condense` below decides what the model sees.
       maxOutputChars: 200_000,
-      sandbox: ctx.sandbox,
+      sandbox: net.sandbox,
+      egressProxy: net.egressProxy,
     });
     if (ctx.signal?.aborted) return "Cancelled: the run was stopped.";
     ctx.events.onCommand?.({
@@ -1231,14 +1298,15 @@ const browseTool: ToolImpl = {
       }
     }
     
-    // Use DEV_DOMAINS as allowlist in restricted mode
-    const allowedDomains = ctx.commandPolicy === "auto" ? null : undefined;
+    // Which hosts are reachable is the egress policy's call (Settings ->
+    // Network); browseUrl checks it on every redirect hop.
+    const policy = await loadEffectivePolicy(ctx.handle.repoKey);
     
     const result = await browseUrl(url, {
       maxChars: 16_000,
       timeoutMs: 15_000,
       mainContentOnly: true,
-      allowedDomains,
+      egress: { policy, repoKey: ctx.handle.repoKey, rootPath: ctx.handle.rootPath },
     });
     
     if (result.error) {
@@ -1278,6 +1346,7 @@ const webSearchTool: ToolImpl = {
     const result = await searchWeb(query, {
       maxResults: 5,
       timeoutMs: 10_000,
+      egress: { repoKey: ctx.handle.repoKey, rootPath: ctx.handle.rootPath },
     });
     
     return result;

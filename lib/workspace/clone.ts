@@ -368,7 +368,7 @@ export async function cloneToWorkspace(
   let setupNotes: string[] | undefined;
   if (options.setup) {
     progress("Setting up the environment…");
-    setupNotes = await bootstrapEnvironment(rootPath, { onProgress: progress, signal: options.signal });
+    setupNotes = await bootstrapEnvironment(rootPath, { onProgress: progress, signal: options.signal, repoKey: meta.repoKey });
   }
   return { repoKey: meta.repoKey, rootPath, label, reused, issue, setupNotes };
 }

@@ -37,6 +37,7 @@ import {
   type SandboxSession,
   type SandboxConfig,
 } from "@/lib/sandbox";
+import { proxyEnv } from "@/lib/egress/proxy";
 
 export { classifyCommand, scrubEnv, type CommandVerdict } from "./safety";
 
@@ -247,6 +248,12 @@ export interface RunOptions {
     startupTimeoutMs?: number;
     extraArgs?: string[];
   };
+  /**
+   * Egress proxy URLs from `prepareProcessEgress`: `hostUrl` for direct
+   * execution, `containerUrl` for the sandbox. When set, the process gets
+   * HTTP(S)_PROXY pointing at the policy-enforcing proxy.
+   */
+  egressProxy?: { hostUrl?: string; containerUrl?: string };
 }
 
 function pushChunk(
@@ -294,6 +301,7 @@ function startCommandDirect(
       env: {
         ...scrubEnv(process.env),
         ...options.env,
+        ...(options.egressProxy?.hostUrl ? proxyEnv(options.egressProxy.hostUrl) : {}),
         // Keep tool output parseable and non-interactive.
         FORCE_COLOR: "0",
         CI: "1",
@@ -410,6 +418,7 @@ function startCommandInSandbox(
         cwd: CONTAINER_WORKSPACE,
         env: {
           ...options.env,
+          ...(options.egressProxy?.containerUrl ? proxyEnv(options.egressProxy.containerUrl) : {}),
           FORCE_COLOR: "0",
           CI: "1",
           NO_COLOR: "1",

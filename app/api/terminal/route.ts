@@ -20,6 +20,7 @@ import {
   subscribe,
 } from "@/lib/terminal";
 import { openWorkspace } from "@/lib/workspace";
+import { auditCommandEgress, checkCommandEgress, prepareProcessEgress } from "@/lib/egress";
 
 export const runtime = "nodejs";
 export const maxDuration = 800;
@@ -157,10 +158,31 @@ export async function POST(request: Request) {
     );
   }
 
+  // Network egress: an explicit deny (or mode "deny") refuses; an
+  // off-allowlist host is allowed because a person typed it, and logged as
+  // such. The egress proxy variables still apply to the process.
+  const where = { repoKey, rootPath: handle.rootPath };
+  const { verdict: net, policy } = await checkCommandEgress(command, where);
+  if (net.action === "block") {
+    return Response.json(
+      { error: `Refused by the network egress policy: ${net.reason}.` },
+      { status: 403 },
+    );
+  }
+  if (net.action === "ask") {
+    await auditCommandEgress(net, { ...where, command, approved: true });
+  }
+  const approvedHosts = net.findings.flatMap((f) => (f.action === "ask" && f.intent.host ? [f.intent.host] : []));
+  const prepared = await prepareProcessEgress({ ...where, policy, approvedHosts });
+  if (prepared.ok === false) {
+    return Response.json({ error: `Refused: ${prepared.error}.` }, { status: 503 });
+  }
+
   const session = startCommand({
     repoKey,
     command,
     cwd: handle.rootPath,
+    egressProxy: prepared.egressProxy,
     origin: "user",
   });
 

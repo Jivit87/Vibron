@@ -15,6 +15,7 @@ import { GitHostSettings } from "@/components/vibe/GitHostSettings";
 import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
 import { McpMarketplace } from "@/components/vibe/McpMarketplace";
 import { HooksSettings } from "@/components/vibe/HooksSettings";
+import { EgressSettings } from "@/components/vibe/EgressSettings";
 
 interface ProviderStatus {
   provider: "anthropic" | "groq" | "openai" | "nvidia" | "gemini";
@@ -65,6 +66,7 @@ const CATEGORIES = [
   { id: "marketplace", label: "MCP Marketplace" },
   { id: "permissions", label: "Permissions" },
   { id: "hooks", label: "Hooks" },
+  { id: "network", label: "Network" },
   { id: "retrieval", label: "Retrieval" },
   { id: "editor", label: "Editor" },
 ] as const;
@@ -286,6 +288,14 @@ export function SettingsPage() {
               hint="Commands that run before or after tool calls and when a run starts or finishes. Exit 2 blocks; the verification gate still has the final say."
             >
               <HooksSettings show={show} />
+            </Section>
+
+            <Section
+              id="network"
+              title="Network"
+              hint="One egress policy for web browsing, shell commands, the Docker sandbox and remote MCP servers. Every decision is logged."
+            >
+              <EgressSettings show={show} />
             </Section>
 
             <Section id="retrieval" title="Retrieval" hint="How much of the code graph agents pull in per request.">

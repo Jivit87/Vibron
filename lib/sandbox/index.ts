@@ -9,8 +9,12 @@
  *
  * Design:
  *  - The workspace directory is bind-mounted read-write into the container.
- *  - Network access is restricted by default (no egress), with an opt-in
- *    allowlist for package registries (npm, pypi, crates.io, etc.).
+ *  - Network access is restricted by default (no egress). When the caller
+ *    goes through `prepareProcessEgress` (lib/egress), the network mode is
+ *    derived from the egress policy: deny -> `none`; allowlist -> a bridge
+ *    network with HTTP(S)_PROXY pointed at the policy-enforcing egress
+ *    proxy. Docker cannot filter by hostname on its own, so "restricted"
+ *    without that proxy is just a bridge network.
  *  - Resource limits (CPU, memory, PID count) prevent fork bombs and OOM.
  *  - A lightweight base image (node:20-slim + python3 + build essentials)
  *    covers the common case; users can specify a custom image.
@@ -28,6 +32,8 @@
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+
+import { PACKAGE_REGISTRY_HOSTS } from "@/lib/egress/presets";
 
 /* -------------------------------- types ---------------------------------- */
 
@@ -79,24 +85,10 @@ const DEFAULT_STARTUP_TIMEOUT = 30_000;
 const CONTAINER_WORKSPACE = "/workspace";
 
 /**
- * Package registry domains allowed when network mode is "restricted".
- * These cover npm, pip, cargo, go modules, maven, and common CDNs.
+ * Package registry domains allowed when network mode is "restricted". The
+ * list is shared with the egress policy's "packageRegistries" preset.
  */
-const PACKAGE_REGISTRY_DOMAINS = [
-  "registry.npmjs.org",
-  "registry.yarnpkg.com",
-  "pypi.org",
-  "files.pythonhosted.org",
-  "crates.io",
-  "static.crates.io",
-  "proxy.golang.org",
-  "sum.golang.org",
-  "repo1.maven.org",
-  "plugins.gradle.org",
-  "rubygems.org",
-  "github.com",
-  "objects.githubusercontent.com",
-];
+const PACKAGE_REGISTRY_DOMAINS = [...PACKAGE_REGISTRY_HOSTS, "github.com"];
 
 /* ----------------------------- detection --------------------------------- */
 
@@ -179,7 +171,7 @@ function ensureImage(image: string): string {
 /**
  * Build the `docker run` command for creating a warm sandbox container.
  */
-function buildRunCommand(
+export function buildRunCommand(
   name: string,
   workspacePath: string,
   config: Required<SandboxConfig>,
@@ -216,6 +208,12 @@ function buildRunCommand(
     } catch {
       // Fall back to default user in the container.
     }
+  }
+
+  // Linux has no built-in host.docker.internal; the egress proxy is
+  // reached through it (Docker Desktop provides it on macOS/Windows).
+  if (process.platform === "linux" && config.network !== "none" && config.network !== "host") {
+    args.push("--add-host", "host.docker.internal:host-gateway");
   }
 
   // Extra user-specified arguments.

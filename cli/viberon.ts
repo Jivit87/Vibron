@@ -15,6 +15,8 @@
  *   viberon mcp list|search|install|remove|enable|disable|test …   (see cli/mcp.ts)
  *   viberon hooks list|trust|revoke [--repo <path>] [--yes] [--hash <sha256>] [--json]
  *   viberon recipe list|show|validate|run|import … (see USAGE)
+ *
+ *   run, issues, clone, eval and recipe run also take --egress <open|allowlist|deny>.
  */
 
 import { MCP_USAGE, McpCliError, parseMcpArgs, type McpArgs } from "./mcp";
@@ -62,6 +64,9 @@ ${MCP_USAGE}
       validates, then saves to <repo>/.viberon/recipes (with --repo) or the global
       recipe dir ($VIBERON_RECIPES_DIR, default ~/Viberon/recipes)
 
+Network: run, issues, clone, eval and recipe run accept --egress <open|allowlist|deny>, which pins the
+egress policy mode for the process (same as VIBERON_EGRESS_MODE); see docs/EGRESS.md.
+
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
 Exit codes (recipe run): as run. (recipe validate/import): 0 ok, 1 invalid recipe, 2 error.
 Exit codes (review): 0 reviewed, 2 error.
@@ -86,6 +91,8 @@ export interface RunArgs {
   issueUrl?: string;
   review?: boolean;
   reviewModel?: string;
+  /** `--egress`: pins the egress policy mode for this process. */
+  egress?: EgressModeFlag;
 }
 
 export interface ReviewArgs {
@@ -105,6 +112,8 @@ export interface IssuesArgs {
   deliver: boolean;
   model?: string;
   json: boolean;
+  /** `--egress`: pins the egress policy mode for this process. */
+  egress?: EgressModeFlag;
 }
 
 export interface CloneArgs {
@@ -114,6 +123,8 @@ export interface CloneArgs {
   depth?: number;
   setup: boolean;
   json: boolean;
+  /** `--egress`: pins the egress policy mode for this process. */
+  egress?: EgressModeFlag;
 }
 
 export interface EvalArgs {
@@ -122,6 +133,8 @@ export interface EvalArgs {
   model?: string;
   maxTurns?: number;
   timeoutSec?: number;
+  /** `--egress`: pins the egress policy mode for this process. */
+  egress?: EgressModeFlag;
 }
 
 export type RecipeAction = "list" | "show" | "validate" | "run" | "import";
@@ -143,6 +156,8 @@ export interface RecipeArgs {
   model?: string;
   global: boolean;
   force: boolean;
+  /** `--egress` (run only): pins the egress policy mode for this process. */
+  egress?: EgressModeFlag;
 }
 
 export type { HooksArgs } from "./hooks";
@@ -151,6 +166,11 @@ export type CliArgs =
   | RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | McpArgs | HooksArgs | RecipeArgs | { command: "help" };
 
 export class CliError extends Error {}
+
+export type EgressModeFlag = "open" | "allowlist" | "deny";
+
+/** Commands that can take `--egress` (they run agents, installs or clones). */
+const EGRESS_COMMANDS = new Set(["run", "issues", "clone", "eval"]);
 
 const BOOLEAN_FLAGS = new Set([
   "worktree", "keep-worktree", "no-gate", "json", "setup", "help", "deliver", "review", "no-deliver",
@@ -210,7 +230,7 @@ const KNOWN: Record<string, Set<string>> = {
   hooks: new Set(["repo", "yes", "hash", "json", "help"]),
   recipe: new Set([
     "repo", "param", "json", "allow-commands", "worktree", "keep-worktree", "out", "max-turns",
-    "timeout", "model", "global", "force", "help",
+    "timeout", "model", "global", "force", "egress", "help",
   ]),
 };
 
@@ -220,7 +240,7 @@ const RECIPE_FLAGS: Record<RecipeAction, string[]> = {
   list: ["repo", "json"],
   show: ["repo", "json"],
   validate: ["repo", "json"],
-  run: ["repo", "param", "json", "allow-commands", "worktree", "keep-worktree", "out", "max-turns", "timeout", "model"],
+  run: ["repo", "param", "json", "allow-commands", "worktree", "keep-worktree", "out", "max-turns", "timeout", "model", "egress"],
   import: ["repo", "global", "force"],
 };
 
@@ -279,6 +299,10 @@ function parseRecipeArgs(argv: string[]): RecipeArgs | { command: "help" } {
   }
   if (flags.has("global") && flags.has("repo")) throw new CliError("recipe import: use only one of --repo and --global");
   if (flags.has("keep-worktree") && !flags.has("worktree")) throw new CliError("recipe run: --keep-worktree needs --worktree");
+  const egress = stringFlag(flags, "egress");
+  if (flags.has("egress") && egress !== "open" && egress !== "allowlist" && egress !== "deny") {
+    throw new CliError("--egress must be one of open, allowlist, deny");
+  }
   return {
     command: "recipe",
     action,
@@ -295,6 +319,7 @@ function parseRecipeArgs(argv: string[]): RecipeArgs | { command: "help" } {
     ...(stringFlag(flags, "model") ? { model: stringFlag(flags, "model") } : {}),
     global: flags.has("global"),
     force: flags.has("force"),
+    ...(egress ? { egress: egress as EgressModeFlag } : {}),
   };
 }
 
@@ -313,9 +338,32 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (command === "recipe") return parseRecipeArgs(rest);
   const { flags, positionals } = splitFlags(rest);
   if (flags.has("help")) return { command: "help" };
+  let egress: EgressModeFlag | undefined;
+  if (flags.has("egress") && EGRESS_COMMANDS.has(command)) {
+    const raw = stringFlag(flags, "egress");
+    if (raw !== "open" && raw !== "allowlist" && raw !== "deny") {
+      throw new CliError("--egress must be one of open, allowlist, deny");
+    }
+    egress = raw;
+    flags.delete("egress");
+  }
   for (const name of flags.keys()) {
     if (!KNOWN[command]!.has(name)) throw new CliError(`Unknown option for ${command}: --${name}`);
   }
+  const parsed = parseCommand(command, flags, positionals);
+  if (!egress) return parsed;
+  switch (parsed.command) {
+    case "run":
+    case "issues":
+    case "clone":
+    case "eval":
+      return { ...parsed, egress };
+    default:
+      return parsed;
+  }
+}
+
+function parseCommand(command: string, flags: Map<string, string | true>, positionals: string[]): CliArgs {
 
   if (command === "run") {
     const repo = stringFlag(flags, "repo") ?? positionals[0];
@@ -437,6 +485,11 @@ export async function main(argv: string[]): Promise<number> {
   if (args.command === "help") {
     process.stdout.write(`${USAGE}\n`);
     return 0;
+  }
+  if ("egress" in args && args.egress) {
+    // Read by lib/egress/settings on every policy load.
+    process.env.VIBERON_EGRESS_MODE = args.egress;
+    log(`network egress mode: ${args.egress}`);
   }
 
   if (args.command === "mcp") {
