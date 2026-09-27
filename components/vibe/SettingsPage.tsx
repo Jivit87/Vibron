@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { useViberon, type AppSettings } from "@/store/viberon";
 import { cx, Segmented, SettingRow as Row, Switch } from "@/components/vibe/primitives";
 import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
+import { EgressSettings } from "@/components/vibe/EgressSettings";
 
 interface ProviderStatus {
   provider: "anthropic" | "groq" | "openai" | "nvidia" | "gemini";
@@ -60,6 +61,7 @@ const CATEGORIES = [
   { id: "agents", label: "Agents" },
   { id: "integrations", label: "Integrations" },
   { id: "permissions", label: "Permissions" },
+  { id: "network", label: "Network" },
   { id: "retrieval", label: "Retrieval" },
   { id: "editor", label: "Editor" },
 ] as const;
@@ -264,6 +266,14 @@ export function SettingsPage() {
                   <Switch checked={settings.autoPreview} onChange={set("autoPreview")} label="Open preview automatically" />
                 </Row>
               )}
+            </Section>
+
+            <Section
+              id="network"
+              title="Network"
+              hint="One egress policy for web browsing, shell commands, the Docker sandbox and remote MCP servers. Every decision is logged."
+            >
+              <EgressSettings show={show} />
             </Section>
 
             <Section id="retrieval" title="Retrieval" hint="How much of the code graph agents pull in per request.">

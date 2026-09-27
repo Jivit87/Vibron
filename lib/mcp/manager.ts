@@ -21,6 +21,7 @@ import path from "node:path";
 import type { McpToolInfo } from "@/lib/mcp/bridge";
 import { configFingerprint, expandTransport, type McpServerConfig } from "@/lib/mcp/config";
 import { scrubEnv } from "@/lib/terminal/safety";
+import { checkServiceUrl } from "@/lib/egress";
 
 export type McpStatus = "idle" | "connecting" | "connected" | "error" | "closed";
 
@@ -91,6 +92,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]).finally(() => clearTimeout(timer));
 }
 
+/** The expanded URL of a remote (http/sse) server, for the egress check. */
+function remoteUrl(config: McpServerConfig): string | null {
+  if (config.transport.type === "stdio") return null;
+  const env = config.source === "global" ? process.env : scrubEnv(process.env);
+  const t = expandTransport(config.transport, env, new Set());
+  return t.type === "stdio" ? null : t.url;
+}
+
 function buildTransport(
   config: McpServerConfig,
   cwd: string | null,
@@ -157,6 +166,18 @@ async function connect(
 
   let transport: Transport | undefined;
   try {
+    // Remote servers go through the egress policy like any other host.
+    // (A stdio server is a local process; its own traffic is outside what
+    // Viberon can see — see docs/EGRESS.md.)
+    const url = remoteUrl(config);
+    if (url) {
+      const check = await checkServiceUrl(url, {
+        repoKey: scope.startsWith("probe:") ? "" : scope,
+        rootPath: cwd,
+        source: "mcp",
+      });
+      if (!check.allowed) throw new Error(`blocked by the network egress policy: ${check.reason}`);
+    }
     transport = buildTransport(config, cwd, conn);
     if (transport instanceof StdioClientTransport) {
       transport.stderr?.on("data", (chunk: Buffer) => log(conn, chunk.toString("utf8")));
