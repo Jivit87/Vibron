@@ -5,8 +5,13 @@
  */
 
 import { DeliverError } from "@/lib/deliver/errors";
+import { loadHostConfig } from "@/lib/git-providers/credentials";
+import { closingReference, parseIssueItemUrl, parsePullRequestItemUrl, type HostConfig } from "@/lib/git-providers/detect";
+import { providerFor, type ResolveOptions } from "@/lib/git-providers/factory";
+import { githubRepo } from "@/lib/git-providers/github";
+import type { ItemLocator } from "@/lib/git-providers/interface";
 import { parseGitHubIssueUrl } from "@/lib/github";
-import { createIssueComment, parsePrUrl, type ApiOptions } from "@/lib/github-api";
+import { parsePrUrl } from "@/lib/github-api";
 import type { SolveResult } from "@/lib/harness/solve-types";
 import { STATUS_TEXT } from "@/lib/headless/report";
 import type { VerificationReport } from "@/lib/verify/types";
@@ -103,10 +108,20 @@ export function titleFromTask(task: string): string {
   return (first.length > 72 ? `${first.slice(0, 71)}…` : first) || "Viberon fix";
 }
 
-/** `Fixes owner/repo#N`: the form GitHub documents for closing an issue on merge. */
+/** A GitHub issue (or PR) URL as before, else a GitLab / Bitbucket issue URL. */
+function issueItem(issueUrl: string, hosts?: HostConfig): ItemLocator | null {
+  const gh = parseGitHubIssueUrl(issueUrl);
+  if (gh) return { repo: githubRepo(gh), kind: "issue", number: gh.number };
+  return parseIssueItemUrl(issueUrl, hosts);
+}
+
+/**
+ * The line that closes the issue on merge, in the host's own form:
+ * `Fixes owner/repo#N` (GitHub), `Closes group/project#N` (GitLab), `Fixes #N` (Bitbucket).
+ */
 function closingLine(issueUrl: string): string {
-  const issue = parseGitHubIssueUrl(issueUrl);
-  return issue ? `Fixes ${issue.owner}/${issue.repo}#${issue.number}` : `Fixes ${issueUrl}`;
+  const issue = issueItem(issueUrl);
+  return issue ? closingReference(issue) : `Fixes ${issueUrl}`;
 }
 
 /** Body for the delivery PR. */
@@ -125,11 +140,14 @@ export function renderPrBody(input: { summary: string; evidence: DeliveryEvidenc
 
 export async function reportOnIssue(
   input: { issueUrl: string; prUrl: string; summary: string; evidence: DeliveryEvidence },
-  opts?: ApiOptions,
+  opts?: ResolveOptions,
 ): Promise<{ commentUrl: string }> {
-  const issue = parseGitHubIssueUrl(input.issueUrl);
-  if (!issue) throw new DeliverError("issueUrl must be a GitHub issue URL.", "invalid_input", 400);
-  if (!parsePrUrl(input.prUrl)) throw new DeliverError("prUrl must be a GitHub pull request URL.", "invalid_input", 400);
+  const hosts = opts?.hosts ?? (await loadHostConfig());
+  const issue = issueItem(input.issueUrl, hosts);
+  if (!issue) throw new DeliverError("issueUrl must be a GitHub, GitLab or Bitbucket issue URL.", "invalid_input", 400);
+  if (!parsePrUrl(input.prUrl) && !parsePullRequestItemUrl(input.prUrl, hosts)) {
+    throw new DeliverError("prUrl must be a GitHub, GitLab or Bitbucket pull request URL.", "invalid_input", 400);
+  }
   const body = [
     `Viberon opened a pull request for this issue: ${input.prUrl}`,
     "",
@@ -137,6 +155,7 @@ export async function reportOnIssue(
     "",
     renderEvidence(input.evidence),
   ].join("\n");
-  const comment = await createIssueComment(issue, body, opts);
-  return { commentUrl: comment.html_url };
+  const provider = await providerFor(issue.repo, opts);
+  const comment = await provider.createComment({ kind: "issue", number: issue.number }, body);
+  return { commentUrl: comment.url };
 }

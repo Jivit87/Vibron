@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * GitHub issues → fix → pull request. Lists the repo's open issues (optionally
+ * Issues (GitHub, GitLab, Bitbucket) → fix → pull request. Lists the repo's open issues (optionally
  * one label), queues fix+deliver tasks for the selected ones, and configures
  * the auto-fix watcher that picks up maintainer-labeled issues.
  * Contract: docs/PLAN-ISSUES.md.
@@ -505,7 +505,7 @@ function StatusCell({
 function IntegrationsLink() {
   return (
     <button type="button" onClick={openIntegrations} className="text-[12px] underline underline-offset-2" style={{ color: "var(--vb-accent)" }}>
-      Add a GitHub token in Settings → Integrations
+      Add credentials in Settings → Integrations
     </button>
   );
 }

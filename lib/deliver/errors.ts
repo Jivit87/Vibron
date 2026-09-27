@@ -1,3 +1,4 @@
+import { GitProviderError } from "@/lib/git-providers/interface";
 import { GitHubApiError } from "@/lib/github-api";
 
 /** A refusal or failure with the HTTP status the routes return as-is. */
@@ -23,6 +24,10 @@ export function errorResponse(error: unknown): Response {
   if (error instanceof GitHubApiError) {
     const status = [401, 403, 404, 409, 422].includes(error.status) ? error.status : 502;
     return Response.json({ error: message, code: "github" }, { status });
+  }
+  if (error instanceof GitProviderError) {
+    const status = error.code === "unsupported" ? 400 : [401, 403, 404, 409, 422].includes(error.status) ? error.status : 502;
+    return Response.json({ error: message, code: error.code === "unsupported" ? "not_supported" : error.platform }, { status });
   }
   return Response.json({ error: message }, { status: 500 });
 }

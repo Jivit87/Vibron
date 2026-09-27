@@ -298,3 +298,30 @@ export function parseIssueUrl(value: string): PrRef | null {
   const m = /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/issues\/(\d+)/i.exec(value.trim());
   return m ? { owner: m[1], repo: m[2].replace(/\.git$/, ""), number: Number(m[3]) } : null;
 }
+
+/* ------------------------------ files and refs ----------------------------- */
+
+/** Raw file text at `ref` (the default branch when omitted), or null when it does not exist. */
+export async function getFileContent(repo: RepoId, filePath: string, ref?: string, opts?: ApiOptions): Promise<string | null> {
+  const encoded = filePath.replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/");
+  const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
+  try {
+    return await call<string>("GET", `/repos/${repo.owner}/${repo.repo}/contents/${encoded}${query}`, undefined, {
+      ...opts,
+      accept: "application/vnd.github.raw+json",
+      raw: true,
+    });
+  } catch (error) {
+    if (error instanceof GitHubApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+export function createBranchRef(repo: RepoId, branch: string, sha: string, opts?: ApiOptions): Promise<void> {
+  return call("POST", `/repos/${repo.owner}/${repo.repo}/git/refs`, { ref: `refs/heads/${branch}`, sha }, opts);
+}
+
+export function updateBranchRef(repo: RepoId, branch: string, sha: string, force = false, opts?: ApiOptions): Promise<void> {
+  const ref = branch.split("/").map(encodeURIComponent).join("/");
+  return call("PATCH", `/repos/${repo.owner}/${repo.repo}/git/refs/heads/${ref}`, { sha, force }, opts);
+}

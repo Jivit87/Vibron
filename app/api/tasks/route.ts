@@ -13,6 +13,8 @@
 
 import { ciFixTask, ciStatus } from "@/lib/deliver";
 import { errorResponse, jsonBody, str } from "@/lib/deliver/errors";
+import { loadHostConfig } from "@/lib/git-providers/credentials";
+import { parseIssueItemUrl } from "@/lib/git-providers/detect";
 import { parseGitHubIssueUrl } from "@/lib/github";
 import { getTaskQueue, type TaskSource } from "@/lib/tasks";
 import { openWorkspace } from "@/lib/workspace";
@@ -31,8 +33,8 @@ export async function POST(request: Request) {
   if (!repoKey) return Response.json({ error: "repoKey is required" }, { status: 400 });
   const source = SOURCES.includes(body.source as TaskSource) ? (body.source as TaskSource) : "api";
   const issueUrl = str(body.issueUrl);
-  if (issueUrl && !parseGitHubIssueUrl(issueUrl)) {
-    return Response.json({ error: "issueUrl must be a GitHub issue URL" }, { status: 400 });
+  if (issueUrl && !parseGitHubIssueUrl(issueUrl) && !parseIssueItemUrl(issueUrl, await loadHostConfig())) {
+    return Response.json({ error: "issueUrl must be a GitHub, GitLab or Bitbucket issue URL" }, { status: 400 });
   }
 
   let task = str(body.task);

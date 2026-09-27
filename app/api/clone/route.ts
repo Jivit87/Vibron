@@ -13,6 +13,7 @@
  */
 
 import { encodeSse, sseHeaders } from "@/lib/sse";
+import { loadHostConfig } from "@/lib/git-providers/credentials";
 import { cloneToWorkspace, parseCloneTarget } from "@/lib/workspace/clone";
 
 export const runtime = "nodejs";
@@ -26,9 +27,9 @@ export async function POST(request: Request) {
   }
   const url = typeof body.url === "string" ? body.url.trim() : "";
   const allowLocal = process.env.VIBERON_ALLOW_LOCAL_CLONE === "1";
-  if (!url || !parseCloneTarget(url, { allowLocal })) {
+  if (!url || !parseCloneTarget(url, { allowLocal, hosts: await loadHostConfig() })) {
     return Response.json(
-      { error: "Provide an https/ssh repository URL, owner/repo, or a GitHub issue URL." },
+      { error: "Provide an https/ssh repository URL, owner/repo, or an issue URL (GitHub, GitLab, Bitbucket)." },
       { status: 400 },
     );
   }
