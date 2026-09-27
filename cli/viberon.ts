@@ -12,7 +12,10 @@
  *   viberon issues [--repo <path>] [--label <l>] [--fix <n,n|all>] [--no-deliver] [--model <id>] [--json]
  *   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
  *   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+ *   viberon hooks list|trust|revoke [--repo <path>] [--yes] [--hash <sha256>] [--json]
  */
+
+import type { HooksArgs } from "./hooks";
 
 export const USAGE = `Usage:
   viberon run --repo <path> (--task <text|issue-url> | --task-file <file>) [options]
@@ -38,6 +41,10 @@ export const USAGE = `Usage:
       worktree of origin/<default>, and opens a draft PR for every fix its checks prove
   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+  viberon hooks list|trust|revoke [--repo <path>] [--yes] [--hash <sha256>] [--json]
+      list shows the workspace (.viberon/hooks.json) and user (~/.viberon/hooks.json) hooks and
+      whether the workspace file is trusted; trust approves this exact version of the workspace file
+      (asks first; --yes for CI, --hash to pin the version); revoke withdraws the approval
 
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
 Exit codes (review): 0 reviewed, 2 error.
@@ -100,11 +107,13 @@ export interface EvalArgs {
   timeoutSec?: number;
 }
 
-export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | { command: "help" };
+export type { HooksArgs } from "./hooks";
+
+export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | HooksArgs | { command: "help" };
 
 export class CliError extends Error {}
 
-const BOOLEAN_FLAGS = new Set(["worktree", "keep-worktree", "no-gate", "json", "setup", "help", "deliver", "review", "no-deliver"]);
+const BOOLEAN_FLAGS = new Set(["worktree", "keep-worktree", "no-gate", "json", "setup", "help", "deliver", "review", "no-deliver", "yes"]);
 
 function splitFlags(argv: string[]): { flags: Map<string, string | true>; positionals: string[] } {
   const flags = new Map<string, string | true>();
@@ -156,6 +165,7 @@ const KNOWN: Record<string, Set<string>> = {
   issues: new Set(["repo", "label", "fix", "no-deliver", "model", "json", "help"]),
   clone: new Set(["ref", "depth", "setup", "json", "help"]),
   eval: new Set(["only", "model", "max-turns", "timeout", "help"]),
+  hooks: new Set(["repo", "yes", "hash", "json", "help"]),
 };
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -244,6 +254,23 @@ export function parseCliArgs(argv: string[]): CliArgs {
       ref: stringFlag(flags, "ref"),
       depth: intFlag(flags, "depth"),
       setup: flags.has("setup"),
+      json: flags.has("json"),
+    };
+  }
+  if (command === "hooks") {
+    const action = positionals[0] ?? "list";
+    if (action !== "list" && action !== "trust" && action !== "revoke") {
+      throw new CliError(`hooks: unknown action "${action}" (list, trust or revoke)`);
+    }
+    const hash = stringFlag(flags, "hash");
+    if (hash && !/^[0-9a-f]{64}$/.test(hash)) throw new CliError("hooks: --hash must be a sha256 hex digest");
+    if ((flags.has("yes") || hash) && action !== "trust") throw new CliError("hooks: --yes and --hash only apply to trust");
+    return {
+      command,
+      action,
+      repo: stringFlag(flags, "repo") ?? positionals[1] ?? ".",
+      yes: flags.has("yes"),
+      ...(hash ? { hash } : {}),
       json: flags.has("json"),
     };
   }
@@ -397,6 +424,30 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     } catch (error) {
       log(`clone failed: ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
+  }
+
+  if (args.command === "hooks") {
+    const { hooksCommand } = await import("./hooks");
+    try {
+      return await hooksCommand(args, {
+        out: (text) => process.stdout.write(text),
+        err: (text) => process.stderr.write(text),
+        confirm: process.stdin.isTTY
+          ? async (question) => {
+              const { createInterface } = await import("node:readline/promises");
+              const rl = createInterface({ input: process.stdin, output: process.stderr });
+              try {
+                return /^y(es)?$/i.test((await rl.question(question)).trim());
+              } finally {
+                rl.close();
+              }
+            }
+          : undefined,
+      });
+    } catch (error) {
+      log(`hooks failed: ${error instanceof Error ? error.message : String(error)}`);
       return 2;
     }
   }

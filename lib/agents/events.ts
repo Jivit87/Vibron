@@ -10,6 +10,7 @@
 
 import type { LedgerSnapshot } from "@/lib/context/ledger";
 import type { RoleId } from "@/lib/agents/roles";
+import type { HookStreamEvent } from "@/lib/hooks/types";
 
 export interface PlanStep {
   id: string;
@@ -266,15 +267,24 @@ export type OrchestrationEvent =
       files: string[];
       injected: boolean;
     }
-  /** A user-configured lifecycle hook ran. */
+  /**
+   * A lifecycle hook ran (lib/hooks). `agentId` is "session" for run-level
+   * hooks (SessionStart, UserPromptSubmit) that belong to no agent lane.
+   */
   | {
       type: "hook";
       agentId: string;
-      event: "pre_tool" | "post_tool" | "stop";
+      event: HookStreamEvent;
+      /** The command, or an in-process hook's name. */
       command: string;
       exitCode: number | null;
       blocked: boolean;
+      /** Block reason, error, or a feedback preview. */
       output: string;
+      tool?: string;
+      source?: "global" | "workspace" | "builtin";
+      outcome?: "proceed" | "blocked" | "modified" | "error" | "skipped";
+      durationMs?: number;
     }
   | { type: "memory"; kind: string; text: string }
   /** Live token/cost accounting, emitted after every agent turn. */

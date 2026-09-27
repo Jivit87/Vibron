@@ -19,6 +19,7 @@ import type {
 } from "@/lib/agents/events";
 import type { LedgerSnapshot } from "@/lib/context/ledger";
 import type { Interaction } from "@/lib/harness/contracts";
+import type { HookStreamEvent } from "@/lib/hooks/types";
 
 export type AgentStatus = "queued" | "running" | "done" | "failed";
 
@@ -59,11 +60,13 @@ export type FeedItem =
   | { kind: "diagnostics"; errorCount: number; files: string[]; injected: boolean }
   | {
       kind: "hook";
-      event: "pre_tool" | "post_tool" | "stop";
+      event: HookStreamEvent;
       command: string;
       exitCode: number | null;
       blocked: boolean;
       output: string;
+      tool?: string;
+      outcome?: "proceed" | "blocked" | "modified" | "error" | "skipped";
     }
   | { kind: "approval"; approvalId: string }
   /** Harness rows; `index` points into `run.verifications` / `gates` / `recoveries`. */
@@ -264,6 +267,8 @@ export interface RunState {
   gates: GateRecord[];
   recoveries: RecoveryRecord[];
   localization?: Localization;
+  /** Hook runs that belong to the run rather than an agent lane. */
+  sessionHooks?: FeedItem[];
 }
 
 export function createRun(input: {
@@ -803,21 +808,24 @@ export function reduceRun(
         ],
       }));
 
-    case "hook":
-      return patchLane(run, event.agentId, now, (lane) => ({
-        ...lane,
-        feed: [
-          ...lane.feed,
-          {
-            kind: "hook",
-            event: event.event,
-            command: event.command,
-            exitCode: event.exitCode,
-            blocked: event.blocked,
-            output: event.output,
-          },
-        ],
-      }));
+    case "hook": {
+      const item: FeedItem = {
+        kind: "hook",
+        event: event.event,
+        command: event.command,
+        exitCode: event.exitCode,
+        blocked: event.blocked,
+        output: event.output,
+        ...(event.tool ? { tool: event.tool } : {}),
+        ...(event.outcome ? { outcome: event.outcome } : {}),
+      };
+      // Run-level hooks (SessionStart, UserPromptSubmit) belong to no lane:
+      // they must not conjure a phantom "Agent" lane that never finishes.
+      if (!run.agents.some((a) => a.id === event.agentId)) {
+        return { ...run, sessionHooks: [...(run.sessionHooks ?? []), item] };
+      }
+      return patchLane(run, event.agentId, now, (lane) => ({ ...lane, feed: [...lane.feed, item] }));
+    }
 
     case "memory":
       return run;

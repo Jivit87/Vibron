@@ -53,6 +53,7 @@ import type { WorkspaceHandle } from "@/lib/workspace";
 import { compactSystemPrompt, getRole, type RoleId } from "@/lib/agents/roles";
 import { countLineDiff, type EventSink } from "@/lib/agents/events";
 import { EMPTY_TOOLSET, loadMcpToolset } from "@/lib/mcp/tools";
+import type { HookEngine } from "@/lib/hooks/engine";
 
 export type ApprovalRequester = (
   agentId: string,
@@ -152,6 +153,11 @@ export interface AgentRunInput {
   editSession?: EditSession;
   /** Harness services for the `compare` and `finish` tools. */
   harness?: ToolContext["harness"];
+  /**
+   * Pre/post-tool and Stop hooks for this run (lib/hooks). The caller
+   * loads them once per run, with workspace trust already applied.
+   */
+  hooks?: HookEngine | null;
   /** 1-based solveTask attempt, echoed on `agent_start`. */
   attempt?: number;
   /** Why this attempt started, echoed on `agent_start`. */
@@ -184,6 +190,12 @@ const MUTATING_TOOLS = new Set([
   "rename_file",
   "create_directory",
 ]);
+
+/**
+ * A Stop hook can send an agent back to work at most this often per run,
+ * so a hook that always objects cannot spin the loop to its step limit.
+ */
+export const MAX_STOP_HOOK_BLOCKS = 3;
 
 /** Plain-text replies cut off by the output cap are continued at most this often. */
 const MAX_TEXT_CONTINUATIONS = 3;
@@ -270,6 +282,9 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
   const role = getRole(input.role);
   const toolNames = input.tools ?? role.tools;
   const controller = input.controller;
+  const hooks = input.hooks && !input.hooks.isEmpty ? input.hooks : null;
+  /** Times a Stop hook has kept this agent working. */
+  let stopBlocks = 0;
   const startedAt = Date.now();
   const filesTouched = new Set<string>();
   let usage: AiUsage = EMPTY_USAGE;
@@ -322,7 +337,7 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
     runId: input.runId,
     retrieval: input.retrieval,
     editSession: input.editSession,
-    harness: input.harness,
+    harness: withStopHook(input.harness),
     recentTerms: [],
     events: {
       onFileChange: (change) => {
@@ -356,6 +371,39 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
         : undefined,
     },
   };
+
+  /**
+   * Ask the Stop hooks whether this agent may finish. Only ever consulted
+   * after the harness allowed the finish (or before the gate runs), so a
+   * hook can add a requirement but never accept work the gate rejected.
+   */
+  async function stopHookObjection(lastMessage: string): Promise<string | null> {
+    if (!hooks || stopBlocks >= MAX_STOP_HOOK_BLOCKS || input.signal?.aborted) return null;
+    const verdict = await hooks.stop({ agentId: input.agentId, lastMessage, stopHookActive: stopBlocks > 0 });
+    if (!verdict.block) return null;
+    stopBlocks += 1;
+    return verdict.reason ?? "A Stop hook asked you to keep working.";
+  }
+
+  /**
+   * `finish` is the solver's way to stop. A Stop hook objection answers it
+   * *before* the gate runs, so the gate still rules on every finish that
+   * goes through and stays the final authority.
+   */
+  function withStopHook(harness: ToolContext["harness"]): ToolContext["harness"] {
+    const finish = harness?.finish;
+    if (!hooks || !finish) return harness;
+    return {
+      ...harness,
+      finish: async (request) => {
+        const objection = await stopHookObjection(request.summary ?? "");
+        if (objection) {
+          return `Finish blocked by a Stop hook (the verification gate did not run):\n${objection}\n\nAddress this, then call finish again.`;
+        }
+        return finish(request);
+      },
+    };
+  }
 
   /*
    * System prompt layering, ordered most-stable-first so the prompt cache
@@ -758,6 +806,22 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
             ? await controller.onFinishAttempt({ text, iteration })
             : null;
         if (!verdict) {
+          // The harness lets the agent end; a Stop hook may still object.
+          // Never after the controller has ruled: an accepted (or given-up)
+          // task is final, and a gate rejection always arrives as `verdict`.
+          const objection =
+            !lastIteration && !controller?.isDone?.() ? await stopHookObjection(text) : null;
+          if (objection) {
+            messages.push({
+              role: "assistant",
+              content: turn.content.length ? turn.content : [{ type: "text", text: "(no reply)" }],
+            });
+            messages.push({
+              role: "user",
+              content: [{ type: "text", text: `(System) A Stop hook blocked finishing:\n${objection}\n\nAddress this before you finish.` }],
+            });
+            continue;
+          }
           stopReason = lastIteration ? "max_iterations" : "finished";
           break;
         }
@@ -819,20 +883,48 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
         // remaining calls without running them: the transcript still needs
         // a result per tool_use.
         let output: string;
+        /** The input the tool actually ran with (a PreToolUse hook may rewrite it). */
+        let callInput = call.input;
+        let ran = false;
+        let hookNote: string | null = null;
         if (input.signal?.aborted) output = "Cancelled: the run was stopped.";
         else if (controller?.isDone?.()) output = "Skipped: the task was already accepted.";
         else if (call.inputError) {
           output = `Error: ${call.inputError} Call ${call.name} again with valid arguments.`;
         } else {
-          const refusal = MUTATING_TOOLS.has(call.name)
-            ? await controller?.beforeMutation?.({ name: call.name, input: call.input })
-            : null;
-          output = refusal ? refusal : await runTool(call.name, call.input, ctx);
+          // PreToolUse hooks run first. A rewritten input still goes through
+          // every check the tool itself makes (scope, command policy, approval).
+          const pre = hooks ? await hooks.preToolUse({ agentId: input.agentId, tool: call.name, input: call.input }) : null;
+          if (pre?.decision === "deny") {
+            output = `Refused by a PreToolUse hook: ${pre.reason}`;
+          } else {
+            if (pre?.modified) {
+              callInput = pre.input;
+              hookNote = "[hook] A PreToolUse hook modified this call's input before it ran.";
+            }
+            if (pre?.context) hookNote = [hookNote, `[hook] ${pre.context}`].filter(Boolean).join("\n");
+            const refusal = MUTATING_TOOLS.has(call.name)
+              ? await controller?.beforeMutation?.({ name: call.name, input: callInput })
+              : null;
+            output = refusal ? refusal : await runTool(call.name, callInput, ctx);
+            ran = !refusal;
+          }
         }
         const failed = isToolFailure(output);
+        if (hookNote) output = `${output}\n\n${hookNote}`;
+        if (hooks && ran) {
+          const feedback = await hooks.postToolUse({
+            agentId: input.agentId,
+            tool: call.name,
+            input: callInput,
+            output,
+            failed,
+          });
+          if (feedback) output = `${output}\n\n[hook feedback]\n${feedback}`;
+        }
         const hint = await controller?.onToolResult?.({
           name: call.name,
-          input: call.input,
+          input: callInput,
           output,
           failed,
           iteration,

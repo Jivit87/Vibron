@@ -4,6 +4,7 @@
  */
 
 import type { SolveResult, SolveStatus } from "@/lib/harness/solve-types";
+import type { HookRunRecord } from "@/lib/hooks/types";
 import type { VerificationReport, VerifyCommand } from "@/lib/verify/types";
 
 export const STATUS_TEXT: Record<SolveStatus, string> = {
@@ -45,6 +46,7 @@ export function renderReport(input: {
   result: SolveResult;
   verifyCommands: VerifyCommand[];
   exitCode: number;
+  hooks?: HookRunRecord[];
 }): string {
   const { result } = input;
   const m = result.metrics;
@@ -98,6 +100,15 @@ export function renderReport(input: {
   if (classes.length) lines.push(`Failure classes: ${classes.map(([k, v]) => `${k}×${v}`).join(", ")}`);
   const tools = Object.entries(m.toolCallsByName).sort((a, b) => b[1] - a[1]);
   if (tools.length) lines.push("", `Tool calls: ${tools.map(([k, v]) => `${k}×${v}`).join(", ")}`);
+
+  if (input.hooks?.length) {
+    lines.push("", "## Hooks", "", "| event | tool | hook | source | outcome | detail |", "|---|---|---|---|---|---|");
+    const cell = (text: string) => text.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim().slice(0, 160) || "-";
+    for (const h of input.hooks.slice(0, 200)) {
+      const outcome = h.outcome === "error" && h.timedOut ? "timed out" : h.outcome;
+      lines.push(`| ${h.event} | ${h.tool ?? "-"} | \`${cell(h.label)}\` | ${h.source} | ${outcome} | ${cell(h.message)} |`);
+    }
+  }
 
   lines.push(
     "",
