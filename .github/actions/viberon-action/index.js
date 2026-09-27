@@ -15,7 +15,6 @@ const core = require('@actions/core');
 const github = require('@actions/github');
 const exec = require('@actions/exec');
 const fs = require('fs');
-const path = require('path');
 
 async function run() {
   try {
@@ -219,7 +218,7 @@ async function createPullRequest(octokit, owner, repo, issueNumber, issueTitle, 
       ref: `refs/heads/${branchName}`,
       sha: baseSha
     });
-  } catch (error) {
+  } catch {
     // Branch might already exist, try to update it
     await octokit.rest.git.updateRef({
       owner,

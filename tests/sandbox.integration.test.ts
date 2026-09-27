@@ -17,7 +17,7 @@ const dockerAvailable = isDockerAvailable();
 
 // Create a temporary workspace for testing
 let testWorkspace: string;
-let activeSessions: TerminalSession[] = [];
+const activeSessions: TerminalSession[] = [];
 
 beforeAll(() => {
   if (!dockerAvailable) {

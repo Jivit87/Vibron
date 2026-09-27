@@ -19,6 +19,11 @@ const eslintConfig = [
       "eval/tasks/**",
     ],
   },
+  {
+    // GitHub Actions run these as plain CommonJS on the Actions Node runtime.
+    files: [".github/actions/**/*.js"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
 ];
 
 export default eslintConfig;
