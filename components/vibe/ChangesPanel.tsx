@@ -120,15 +120,29 @@ export function ChangesPanel() {
         body: JSON.stringify({ repoKey, id }),
       });
       if (!response.ok) {
-        toast.error("Restore failed.");
+        const failure = (await response.json().catch(() => null)) as { error?: string } | null;
+        toast.error(failure?.error ?? "Restore failed.");
         return;
       }
-      const body = (await response.json()) as { restored: number; deleted: number };
-      toast.success(
-        `Restored ${body.restored} file${body.restored === 1 ? "" : "s"}${
-          body.deleted ? `, removed ${body.deleted}` : ""
-        }.`,
-      );
+      const body = (await response.json()) as {
+        restored: number;
+        deleted: number;
+        conflicts?: { path: string; reason: string }[];
+      };
+      const message = `Restored ${body.restored} file${body.restored === 1 ? "" : "s"}${
+        body.deleted ? `, removed ${body.deleted}` : ""
+      }.`;
+      // A session checkpoint leaves files other sessions changed alone.
+      if (body.conflicts?.length) {
+        toast.warning(`${message} ${body.conflicts.length} left alone.`, {
+          description: body.conflicts
+            .slice(0, 4)
+            .map((c) => `${c.path}: ${c.reason}`)
+            .join("\n"),
+        });
+      } else {
+        toast.success(message);
+      }
       await refreshWorkspace();
     } finally {
       setBusy(false);

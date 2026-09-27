@@ -12,6 +12,7 @@ import { AssistantMessage } from "@/components/AssistantMessage";
 import { AgentRunView } from "@/components/vibe/AgentRunView";
 import { Composer } from "@/components/vibe/Composer";
 import { ConversationHistory } from "@/components/vibe/ConversationHistory";
+import { QueuedNotice, SessionSwitcher } from "@/components/vibe/SessionSwitcher";
 import { useViberon, type ChatMessage, type RunState } from "@/store/viberon";
 import { cx, formatAgo, Kbd } from "@/components/vibe/primitives";
 
@@ -82,6 +83,7 @@ export function ChatShell() {
 
       <div className="shrink-0 px-5 pb-4 pt-2">
         <div className="mx-auto w-full max-w-[760px]">
+          <QueuedNotice />
           <Composer />
         </div>
       </div>
@@ -160,6 +162,8 @@ function ConversationBar() {
           {intent === "ask" ? "read-only" : "editing"}
         </span>
       )}
+      <span className="mx-0.5 h-3.5 w-px shrink-0" style={{ background: "var(--vb-line)" }} aria-hidden />
+      <SessionSwitcher variant="tabs" />
       <div className="flex-1" />
       {messages.length > 0 && (
       <button

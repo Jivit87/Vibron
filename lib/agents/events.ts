@@ -8,6 +8,7 @@
  * plus one branch there.
  */
 
+import type { SessionStatus } from "@/lib/sessions/types";
 import type { LedgerSnapshot } from "@/lib/context/ledger";
 import type { RoleId } from "@/lib/agents/roles";
 import type { HookStreamEvent } from "@/lib/hooks/types";
@@ -308,7 +309,19 @@ export type OrchestrationEvent =
       durationMs: number;
       costUsd: number;
     }
-  | { type: "error"; message: string; fatal: boolean };
+  | { type: "error"; message: string; fatal: boolean }
+  /**
+   * Multi-session bookkeeping from the session manager: the run is queued
+   * behind the concurrency limit (`position` 1 = next), has started, or the
+   * session moved to another status. Absent for runs without a session.
+   */
+  | {
+      type: "session";
+      sessionId: string;
+      status: SessionStatus;
+      position?: number;
+      message?: string;
+    };
 
 export type EventSink = (event: OrchestrationEvent) => void;
 

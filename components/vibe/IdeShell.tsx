@@ -40,6 +40,7 @@ import { PreviewPanel } from "@/components/vibe/PreviewPanel";
 import { ProblemsPanel } from "@/components/vibe/ProblemsPanel";
 import { ScmPanel } from "@/components/vibe/ScmPanel";
 import { SearchPanel } from "@/components/vibe/SearchPanel";
+import { QueuedNotice, SessionSwitcher } from "@/components/vibe/SessionSwitcher";
 import { TerminalPanel } from "@/components/vibe/TerminalPanel";
 import { TasksPanel } from "@/components/vibe/TasksPanel";
 import { IssuesPanel } from "@/components/vibe/IssuesPanel";
@@ -375,6 +376,7 @@ function AgentDock() {
         <ConversationHistory compact align="right" />
         {streaming && <Dot color="var(--vb-accent)" live size={5} />}
         <div className="flex-1" />
+        <SessionSwitcher variant="compact" />
         <IconButton
           title={streaming ? "Stop the current run first" : "New chat"}
           disabled={streaming || messages.length === 0}
@@ -407,6 +409,7 @@ function AgentDock() {
       </div>
 
       <div className="shrink-0 p-2">
+        <QueuedNotice />
         <Composer />
       </div>
     </div>

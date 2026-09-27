@@ -32,6 +32,8 @@ export interface AgentRequest {
   maxNodes?: number;
   attachments?: ContextAttachment[];
   images?: ImageAttachment[];
+  /** Run inside this session (see docs/MULTI_SESSION.md). Absent = a sessionless run. */
+  sessionId?: string;
 }
 
 /** POST /api/agent/cancel */

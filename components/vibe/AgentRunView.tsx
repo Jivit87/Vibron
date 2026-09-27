@@ -987,11 +987,24 @@ function ChangeList({ run }: { run: RunState }) {
       body: JSON.stringify({ repoKey, id: run.checkpointId }),
     }).catch(() => null);
     if (response?.ok) {
-      const body = (await response.json()) as { restored: number; deleted: number };
-      toast.success(`Restored ${body.restored} file${body.restored === 1 ? "" : "s"}.`);
+      const body = (await response.json()) as {
+        restored: number;
+        deleted: number;
+        conflicts?: { path: string; reason: string }[];
+      };
+      const message = `Restored ${body.restored + body.deleted} file${body.restored + body.deleted === 1 ? "" : "s"}.`;
+      // A session's checkpoint never overwrites what another session changed.
+      if (body.conflicts?.length) {
+        toast.warning(`${message} ${body.conflicts.length} left alone.`, {
+          description: body.conflicts.slice(0, 4).map((c) => `${c.path}: ${c.reason}`).join("\n"),
+        });
+      } else {
+        toast.success(message);
+      }
       void refreshWorkspace();
     } else {
-      toast.error("Could not restore that checkpoint.");
+      const failure = (await response?.json().catch(() => null)) as { error?: string } | null;
+      toast.error(failure?.error ?? "Could not restore that checkpoint.");
     }
   }
 

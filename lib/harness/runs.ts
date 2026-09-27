@@ -21,6 +21,7 @@ import type {
   OrchestrationEvent,
 } from "@/lib/agents/events";
 import { killSessionsByRun } from "@/lib/harness/workspace-services";
+import { releaseOwner, type LockOwner } from "@/lib/sessions/file-locks";
 
 /** What an agent asks the user to approve. */
 export interface ApprovalAsk {
@@ -50,6 +51,10 @@ export interface RunRecord {
   emit: EventSink;
   startedAt: number;
   approvals: Set<string>;
+  /** The session this run belongs to, when it was started from one. */
+  sessionId?: string;
+  /** The session's title, for lock-conflict messages. */
+  label?: string;
 }
 
 interface Registry {
@@ -72,7 +77,11 @@ host[KEY] = registry;
 /** Auto-deny after this long with no answer. */
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
-export function createRun(repoKey: string, emit: EventSink): RunRecord {
+export function createRun(
+  repoKey: string,
+  emit: EventSink,
+  options: { sessionId?: string; label?: string } = {},
+): RunRecord {
   const controller = new AbortController();
   const run: RunRecord = {
     runId: randomUUID(),
@@ -82,6 +91,8 @@ export function createRun(repoKey: string, emit: EventSink): RunRecord {
     emit,
     startedAt: Date.now(),
     approvals: new Set(),
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.label ? { label: options.label } : {}),
   };
   registry.runs.set(run.runId, run);
   return run;
@@ -89,6 +100,18 @@ export function createRun(repoKey: string, emit: EventSink): RunRecord {
 
 export function getRun(runId: string): RunRecord | undefined {
   return registry.runs.get(runId);
+}
+
+/**
+ * Who a run's file writes are attributed to for the cross-session lock: its
+ * session when it has one, otherwise the run itself. Null for an unknown run
+ * (a tool called outside any registered run is not lock-managed).
+ */
+export function lockOwnerForRun(runId: string): LockOwner | null {
+  const run = registry.runs.get(runId);
+  if (!run) return null;
+  if (run.sessionId) return { ownerId: run.sessionId, label: run.label ?? run.sessionId };
+  return { ownerId: run.runId, label: run.label ?? `run ${run.runId.slice(0, 8)}` };
 }
 
 /** Point a run's events at a new sink (the stream opens after the run exists). */
@@ -195,10 +218,15 @@ export function cancelRun(runId: string): boolean {
   return true;
 }
 
-/** Forget a finished run. Anything still pending is denied first. */
+/**
+ * Forget a finished run. Anything still pending is denied first, and the
+ * files it locked against other sessions are released.
+ */
 export function finishRun(runId: string): void {
+  const owner = lockOwnerForRun(runId);
   denyRunApprovals(runId);
   registry.runs.delete(runId);
+  if (owner) releaseOwner(owner.ownerId);
 }
 
 /** Test helper: drop all state, including "allow always" grants. */

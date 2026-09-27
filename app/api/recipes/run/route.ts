@@ -1,24 +1,31 @@
 /**
  * POST /api/recipes/run — run a recipe, streaming its progress as SSE.
  *
- * Body: `{ repoKey, name, params?, model?, commandPolicy?, editPolicy?, autoCheckpoint? }`.
+ * Body: `{ repoKey, name, params?, model?, commandPolicy?, editPolicy?, autoCheckpoint?, sessionId? }`.
  *
  * The stream is the ordinary run stream (`OrchestrationEvent`s: the recipe
  * as a plan, one lane per step, verification and command events, and a
  * final `run_done`), so the composer's run view renders it unchanged. The
  * run is registered like an agent run: its id travels in `X-Run-Id`, and
  * approvals and Stop use `/api/agent/approve` and `/api/agent/cancel`.
+ *
+ * With a `sessionId` the recipe runs as that session's run, exactly like an
+ * agent run (docs/MULTI_SESSION.md): it waits for a slot under the
+ * workspace's concurrency limit, locks the files it writes against other
+ * sessions, journals a session-scoped checkpoint, and works in the
+ * session's worktree when the session is isolated.
  */
 
-import type { EventSink, OrchestrationEvent } from "@/lib/agents/events";
+import type { EventSink, OrchestrationEvent, RunStatus } from "@/lib/agents/events";
 import { resolveModel } from "@/lib/ai";
-import { createCheckpoint } from "@/lib/checkpoints";
+import { createCheckpoint, createSessionCheckpoint, journalFileChange } from "@/lib/checkpoints";
 import { jsonBody, str } from "@/lib/deliver/errors";
 import { RUN_ID_HEADER } from "@/lib/harness/contracts";
 import { cancelRun, createRun, finishRun, requestApproval } from "@/lib/harness/runs";
 import { describeInvocation, recipeSolver } from "@/lib/recipes/run";
 import { RECIPE_NAME_RE, resolveParams } from "@/lib/recipes/schema";
 import { findRecipe } from "@/lib/recipes/store";
+import { getSessionManager, SessionError, type SessionSummary } from "@/lib/sessions";
 import { encodeSse, sseHeaders } from "@/lib/sse";
 import { getGraph } from "@/lib/store";
 import { detectVerifyCommands } from "@/lib/verify";
@@ -40,7 +47,18 @@ export async function POST(request: Request) {
     return Response.json({ error: "params must be an object" }, { status: 400 });
   }
 
-  const handle = await openWorkspace(repoKey);
+  const sessionId = str(body.sessionId);
+  const sessions = sessionId ? await getSessionManager() : null;
+  let session: SessionSummary | undefined;
+  if (sessions) {
+    session = sessions.get(sessionId);
+    if (!session || session.repoKey !== repoKey) {
+      return Response.json({ error: "Unknown session" }, { status: 404 });
+    }
+  }
+  const worktree = session ? sessions!.worktreeOf(session.id) : undefined;
+
+  const handle = await openWorkspace(worktree?.repoKey ?? repoKey);
   const entry = await findRecipe(name, handle.rootPath);
   if (!entry || entry.source === "file") return Response.json({ error: `No recipe named "${name}".` }, { status: 404 });
   if (!entry.recipe) {
@@ -56,21 +74,55 @@ export async function POST(request: Request) {
   const editPolicy = body.editPolicy === "ask" ? "ask" : "auto";
   const requestedModel = str(body.model) || "auto";
 
-  if (!(await getGraph(repoKey))) await fullReindex(handle);
-  const checkpoint =
-    body.autoCheckpoint !== false
-      ? await createCheckpoint(handle, `Recipe ${recipe.name}`).catch(() => null)
-      : null;
+  if (!(await getGraph(handle.repoKey))) await fullReindex(handle);
 
   let sink: EventSink = () => {};
-  const run = createRun(repoKey, (event) => sink(event));
+  let journalId: string | null = null;
+  let journal: Promise<void> = Promise.resolve();
+  let lastStatus: RunStatus | null = null;
+  let fatalError: string | undefined;
+  const deliver: EventSink = (event) => {
+    if (event.type === "run_done") lastStatus = event.status ?? "done";
+    if (event.type === "error" && event.fatal) fatalError = event.message;
+    if (session) {
+      sessions!.observe(session.id, event);
+      if (event.type === "file_change" && journalId) {
+        const id = journalId;
+        journal = journal.then(() => journalFileChange(id, event)).catch(() => undefined);
+      }
+    }
+    sink(event);
+  };
+  const run = createRun(repoKey, deliver, session ? { sessionId: session.id, label: session.title } : {});
   const { runId } = run;
+
+  if (session) {
+    try {
+      session = sessions!.beginRun(session.id, runId, { model: requestedModel });
+    } catch (error) {
+      finishRun(runId);
+      const status = error instanceof SessionError ? error.status : 500;
+      return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status });
+    }
+  }
+
+  const label = `Recipe ${recipe.name}`;
+  const checkpoint =
+    body.autoCheckpoint !== false
+      ? await (session ? createSessionCheckpoint(handle, session.id, label) : createCheckpoint(handle, label)).catch(
+          () => null,
+        )
+      : null;
+  if (checkpoint && session) {
+    journalId = checkpoint.id;
+    sessions!.addCheckpoint(session.id, checkpoint.id);
+  }
   request.signal.addEventListener("abort", () => cancelRun(runId));
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
-      const send = (event: OrchestrationEvent) => {
+      sink = (event: OrchestrationEvent) => {
         if (closed) return;
         try {
           controller.enqueue(encodeSse(event));
@@ -78,7 +130,7 @@ export async function POST(request: Request) {
           closed = true;
         }
       };
-      sink = send;
+      const send = deliver;
       const heartbeat = setInterval(() => {
         if (closed) return;
         try {
@@ -93,6 +145,20 @@ export async function POST(request: Request) {
       }
 
       try {
+        if (session) {
+          const granted = await sessions!.acquireSlot(session.id, { exclusive: false, signal: run.signal, emit: send });
+          if (!granted) {
+            send({
+              type: "run_done",
+              status: "cancelled",
+              summary: "Stopped before it started: the run was still queued.",
+              filesChanged: 0,
+              durationMs: Date.now() - run.startedAt,
+              costUsd: 0,
+            });
+            return;
+          }
+        }
         const model = await resolveModel(requestedModel, { agenticOnly: true });
         const commands = handle.rootPath ? await detectVerifyCommands(handle.rootPath).catch(() => []) : [];
         const solve = recipeSolver(recipe, values, {
@@ -124,6 +190,14 @@ export async function POST(request: Request) {
         });
       } finally {
         clearInterval(heartbeat);
+        await journal;
+        if (session) {
+          sessions!.finishRun(
+            session.id,
+            lastStatus ?? (run.signal.aborted ? "cancelled" : "failed"),
+            lastStatus === "failed" || !lastStatus ? fatalError : undefined,
+          );
+        }
         finishRun(runId);
         closed = true;
         try {

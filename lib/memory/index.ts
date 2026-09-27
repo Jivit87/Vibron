@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 
+import { withKeyedLock } from "@/lib/concurrency/keyed-mutex";
 import type { Graph } from "@/lib/graph";
 import { getValueRaw, setValueRaw } from "@/lib/store";
 import { countTokens } from "@/lib/tokens";
@@ -50,15 +51,109 @@ export async function saveMemory(memory: ProjectMemory): Promise<void> {
   await setValueRaw(MEMORY_KEY(memory.repoKey), memory);
 }
 
+/**
+ * Serialize every read-modify-write of one workspace's memory blob. Several
+ * sessions share it, and without this two concurrent writers each load the
+ * same snapshot and the second save silently drops the first's changes.
+ * Not reentrant: never call a locked helper from inside `fn`.
+ */
+export function withMemoryLock<T>(repoKey: string, fn: () => Promise<T>): Promise<T> {
+  return withKeyedLock("memory", repoKey, fn);
+}
+
 /** Read-modify-write helper so callers never race on the stored blob. */
 export async function mutateMemory(
   repoKey: string,
   mutate: (memory: ProjectMemory) => void | Promise<void>,
 ): Promise<ProjectMemory> {
-  const memory = await loadMemory(repoKey);
-  await mutate(memory);
-  await saveMemory(memory);
-  return memory;
+  return withMemoryLock(repoKey, async () => {
+    const memory = await loadMemory(repoKey);
+    await mutate(memory);
+    await saveMemory(memory);
+    return memory;
+  });
+}
+
+/** A deep copy to diff a run's working memory against later (`mergeMemory`). */
+export function snapshotMemory(memory: ProjectMemory): ProjectMemory {
+  return structuredClone(memory);
+}
+
+const ENTRY_BUCKETS = ["conventions", "decisions", "facts", "suggestions"] as const;
+const STAT_KEYS = [
+  "turns",
+  "tokensIn",
+  "tokensOut",
+  "tokensCached",
+  "tokensSaved",
+  "costUsd",
+  "savedUsd",
+] as const;
+
+/** Apply one run's changes to a list keyed by id: edits, additions, removals. */
+function mergeById<T extends { id: string }>(fresh: T[], base: T[], local: T[]): T[] {
+  const baseById = new Map(base.map((item) => [item.id, JSON.stringify(item)] as const));
+  const localIds = new Set(local.map((item) => item.id));
+  // Removed by this run: present at the start, gone now.
+  const removed = new Set(base.filter((item) => !localIds.has(item.id)).map((item) => item.id));
+  const out = fresh.filter((item) => !removed.has(item.id));
+  const index = new Map(out.map((item, i) => [item.id, i] as const));
+  for (const item of local) {
+    const before = baseById.get(item.id);
+    if (before !== undefined && before === JSON.stringify(item)) continue; // untouched by this run
+    const at = index.get(item.id);
+    if (at === undefined) {
+      index.set(item.id, out.length);
+      out.push(item);
+    } else {
+      out[at] = item;
+    }
+  }
+  return out;
+}
+
+/**
+ * Three-way merge of one run's working copy of memory into the stored one.
+ *
+ * `base` is what the run loaded, `local` is what it holds now, `fresh` is the
+ * current stored blob, which other sessions may have written meanwhile. Only
+ * the run's own delta is applied: entries and tasks it added, edited or
+ * removed (by id), an overview it rewrote, and its stats increments. Derived
+ * fields (files, stack, scripts) come from `fresh`; they are recomputed from
+ * the workspace anyway. The result respects the per-kind entry caps.
+ */
+export function mergeMemory(
+  fresh: ProjectMemory,
+  base: ProjectMemory,
+  local: ProjectMemory,
+): ProjectMemory {
+  const merged: ProjectMemory = structuredClone(fresh);
+  for (const bucket of ENTRY_BUCKETS) {
+    const kind = bucket.slice(0, -1) as MemoryEntryKind;
+    const entries = mergeById(fresh[bucket], base[bucket], local[bucket]);
+    const cap = MAX_ENTRIES[kind];
+    merged[bucket] = entries.length > cap ? entries.slice(entries.length - cap) : entries;
+  }
+  const tasks = mergeById(fresh.tasks, base.tasks, local.tasks);
+  merged.tasks = tasks.length > MAX_TASKS ? tasks.slice(tasks.length - MAX_TASKS) : tasks;
+  if (local.overview !== base.overview) merged.overview = local.overview;
+  for (const key of STAT_KEYS) {
+    merged.stats[key] = fresh.stats[key] + (local.stats[key] - base.stats[key]);
+  }
+  return merged;
+}
+
+/**
+ * Persist a run's working memory without clobbering concurrent writers:
+ * under the memory lock, merge its delta since `base` into the stored blob.
+ * Returns the merged memory (the run's new base).
+ */
+export function commitMemory(base: ProjectMemory, local: ProjectMemory): Promise<ProjectMemory> {
+  return withMemoryLock(local.repoKey, async () => {
+    const merged = mergeMemory(await loadMemory(local.repoKey), base, local);
+    await saveMemory(merged);
+    return merged;
+  });
 }
 
 function newId(prefix: string): string {

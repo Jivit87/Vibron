@@ -6,6 +6,11 @@
  * Opens the SSE stream, feeds every event into the store, and owns the side
  * effects that cannot live in a reducer: opening the tab an agent just
  * edited, wiring the preview URL, cancelling, and answering approvals.
+ *
+ * Several sessions can stream at once. Each stream is keyed by its session
+ * and writes into that session's slice of the store whether or not it is on
+ * screen, so switching sessions never drops an event; a background session
+ * that needs an approval, or finishes, raises a notification instead.
  */
 
 import { toast } from "sonner";
@@ -14,6 +19,7 @@ import type { ApprovalDecision, OrchestrationEvent, RunPlan, RunStatus } from "@
 import { RUN_ID_HEADER, type AgentRequest, type Interaction } from "@/lib/harness/contracts";
 import type { ContextAttachment, ImageAttachment } from "@/lib/composer/types";
 import { answerMockApproval, isMockMode, mockResponse, mockScript, mockTaskScript } from "@/lib/client/mock-run";
+import { notifySession } from "@/lib/client/notify";
 import { useViberon } from "@/store/viberon";
 
 /** Parse one `data:`-prefixed SSE frame. */
@@ -31,20 +37,36 @@ export function parseFrame(frame: string): OrchestrationEvent | null {
   }
 }
 
-let activeController: AbortController | null = null;
-/** Server-issued run id (from `X-Run-Id` or `run_start`), for cancel. */
-let activeRunId: string | null = null;
+interface LiveStream {
+  controller: AbortController;
+  /** Server-issued run id (from `X-Run-Id` or `run_start`), for cancel. */
+  runId: string | null;
+}
+
+/** Open streams by session id ("" for a run without a session). */
+const live = new Map<string, LiveStream>();
+
+function keyOf(sessionId: string | null | undefined): string {
+  return sessionId ?? "";
+}
+
+/** Whether `sessionId` (default: the active session) has a stream open here. */
+export function isStreaming(sessionId?: string | null): boolean {
+  return live.has(keyOf(sessionId === undefined ? useViberon.getState().activeSessionId : sessionId));
+}
 
 /**
- * Stop the run: ask the server to cancel (which denies pending approvals and
- * kills the run's processes), then abort the stream. The server's
- * `run_done{status:"cancelled"}` usually arrives first; the abort is the
- * backstop when the server is unreachable or predates the cancel route.
+ * Stop a session's run (default: the active one): ask the server to cancel
+ * (which denies pending approvals and kills the run's processes), then abort
+ * the stream. The server's `run_done{status:"cancelled"}` usually arrives
+ * first; the abort is the backstop when the server is unreachable or
+ * predates the cancel route.
  */
-export async function cancelRun(): Promise<void> {
-  const controller = activeController;
-  if (!controller) return;
-  const runId = activeRunId;
+export async function cancelRun(sessionId?: string | null): Promise<void> {
+  const key = keyOf(sessionId === undefined ? useViberon.getState().activeSessionId : sessionId);
+  const stream = live.get(key);
+  if (!stream) return;
+  const { controller, runId } = stream;
   if (runId && !isMockMode()) {
     try {
       await Promise.race([
@@ -60,15 +82,18 @@ export async function cancelRun(): Promise<void> {
     }
   }
   controller.abort();
-  if (activeController === controller) activeController = null;
+  if (live.get(key)?.controller === controller) live.delete(key);
 }
 
 export async function answerApproval(
   approvalId: string,
   decision: ApprovalDecision,
+  sessionId?: string | null,
 ): Promise<void> {
   // Optimistic: the card collapses immediately. `approval_resolved` confirms.
-  useViberon.getState().resolveApproval(approvalId, decision === "deny" ? "deny" : "allow");
+  useViberon
+    .getState()
+    .resolveApproval(approvalId, decision === "deny" ? "deny" : "allow", sessionId);
   if (isMockMode()) {
     answerMockApproval(approvalId, decision);
     return;
@@ -106,11 +131,15 @@ export async function sendPrompt(
 
   const store = useViberon.getState();
   if (store.streaming) {
-    toast.error("A run is already in progress. Stop it first.");
+    toast.error(
+      store.sessions.length > 0
+        ? "This session is already running. Stop it, or start another session."
+        : "A run is already in progress. Stop it first.",
+    );
     return;
   }
 
-  const { repoKey, settings, messages } = store;
+  const { repoKey, settings, messages, activeSessionId: sessionId } = store;
   if (!repoKey) {
     toast.error("No workspace is open.");
     return;
@@ -125,14 +154,15 @@ export async function sendPrompt(
     content: m.content,
   }));
 
-  if (!options.silent) store.appendMessage("user", trimmed);
+  if (!options.silent) store.appendMessage("user", trimmed, sessionId);
   store.startRun({
     prompt: trimmed,
     model: settings.model,
     mode: settings.agentMode,
     interaction,
+    sessionId,
   });
-  store.appendMessage("assistant", "");
+  store.appendMessage("assistant", "", sessionId);
 
   const body: AgentRequest = {
     repoKey,
@@ -149,9 +179,12 @@ export async function sendPrompt(
     autoCheckpoint: settings.autoCheckpoint,
     attachments: options.attachments?.length ? options.attachments : undefined,
     images: options.images?.length ? options.images : undefined,
+    // Mock sessions exist only in the browser.
+    sessionId: sessionId && !isMockMode() ? sessionId : undefined,
   };
 
   await pumpRun({
+    sessionId,
     conversational: true,
     open: (signal) =>
       isMockMode()
@@ -178,10 +211,14 @@ export async function sendPrompt(
 export async function runRecipe(name: string, params: Record<string, string | number | boolean>): Promise<void> {
   const store = useViberon.getState();
   if (store.streaming) {
-    toast.error("A run is already in progress. Stop it first.");
+    toast.error(
+      store.sessions.length > 0
+        ? "This session is already running. Stop it, or start another session."
+        : "A run is already in progress. Stop it first.",
+    );
     return;
   }
-  const { repoKey, settings } = store;
+  const { repoKey, settings, activeSessionId: sessionId } = store;
   if (!repoKey) {
     toast.error("No workspace is open.");
     return;
@@ -191,10 +228,11 @@ export async function runRecipe(name: string, params: Record<string, string | nu
     .map(([k, v]) => `${k}=${typeof v === "string" && /\s/.test(v) ? JSON.stringify(v) : String(v)}`)
     .join(" ");
   const prompt = `/recipe ${name}${args ? ` ${args}` : ""}`;
-  store.appendMessage("user", prompt);
-  store.startRun({ prompt, model: settings.model, mode: "orchestrated", interaction: "agent" });
-  store.appendMessage("assistant", "");
+  store.appendMessage("user", prompt, sessionId);
+  store.startRun({ prompt, model: settings.model, mode: "orchestrated", interaction: "agent", sessionId });
+  store.appendMessage("assistant", "", sessionId);
   await pumpRun({
+    sessionId,
     conversational: true,
     open: (signal) =>
       isMockMode()
@@ -211,6 +249,8 @@ export async function runRecipe(name: string, params: Record<string, string | nu
               commandPolicy: settings.commandPolicy,
               editPolicy: settings.editPolicy,
               autoCheckpoint: settings.autoCheckpoint,
+              // Mock sessions exist only in the browser.
+              sessionId: sessionId && !isMockMode() ? sessionId : undefined,
             }),
           }),
   });
@@ -235,10 +275,12 @@ export async function attachTaskRun(task: { id: string; task: string }): Promise
     toast.error("A run is already in progress. Stop it first.");
     return;
   }
-  store.startRun({ prompt: task.task, model: store.settings.model, mode: "single", interaction: "fix" });
+  const sessionId = store.activeSessionId;
+  store.startRun({ prompt: task.task, model: store.settings.model, mode: "single", interaction: "fix", sessionId });
   attachedTaskId = task.id;
   try {
     await pumpRun({
+      sessionId,
       conversational: false,
       open: (signal) =>
         isMockMode()
@@ -254,19 +296,54 @@ export async function attachTaskRun(task: { id: string; task: string }): Promise
 }
 
 /**
+ * Reattach to a session's live run after a reload: replay its buffered
+ * events from `GET /api/sessions/:id/events`, then follow the live tail.
+ * The thread already holds the prompt and whatever reply was saved, so this
+ * drives the run view only.
+ */
+export async function attachSessionRun(sessionId: string): Promise<void> {
+  const store = useViberon.getState();
+  if (live.has(keyOf(sessionId)) || isMockMode()) return;
+  const session = store.sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+  store.startRun({
+    prompt: "Reconnected to a running session",
+    model: session.model,
+    mode: store.settings.agentMode,
+    sessionId,
+  });
+  await pumpRun({
+    sessionId,
+    conversational: false,
+    open: (signal) =>
+      fetch(`/api/sessions/${encodeURIComponent(sessionId)}/events`, {
+        headers: { Accept: "text/event-stream" },
+        signal,
+      }),
+  });
+}
+
+/**
  * Read one run's SSE stream into the store. Conversational runs also write
  * the reply into the chat; an attached task run only drives the run view.
  */
 async function pumpRun({
   open,
   conversational,
+  sessionId,
 }: {
   open: (signal: AbortSignal) => Promise<Response>;
   conversational: boolean;
+  sessionId: string | null;
 }): Promise<void> {
   const controller = new AbortController();
-  activeController = controller;
-  activeRunId = null;
+  const key = keyOf(sessionId);
+  const stream: LiveStream = { controller, runId: null };
+  live.set(key, stream);
+  const onScreen = () => {
+    const { activeSessionId } = useViberon.getState();
+    return !sessionId || !activeSessionId || activeSessionId === sessionId;
+  };
 
   /**
    * Batch store writes. Token deltas arrive faster than React can render;
@@ -283,7 +360,7 @@ async function pumpRun({
     if (queue.length === 0) return;
     const batch = queue.splice(0, queue.length);
     const state = useViberon.getState();
-    for (const event of batch) state.applyEvent(event);
+    for (const event of batch) state.applyEvent(event, sessionId);
   };
   const schedule = () => {
     if (flushHandle !== null) return;
@@ -301,7 +378,7 @@ async function pumpRun({
     }
 
     // An attached task is cancelled from the Tasks panel, not /api/agent/cancel.
-    activeRunId = conversational ? response.headers.get(RUN_ID_HEADER) : null;
+    stream.runId = conversational ? response.headers.get(RUN_ID_HEADER) : null;
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -324,7 +401,7 @@ async function pumpRun({
 
         switch (event.type) {
           case "run_start":
-            if (conversational) activeRunId = activeRunId ?? event.runId;
+            if (conversational) stream.runId = stream.runId ?? event.runId;
             break;
 
           case "answer":
@@ -333,19 +410,31 @@ async function pumpRun({
             // matches the order the model produced them in.
             flush();
             answeredInline = true;
-            useViberon.getState().appendToLastAssistant(event.text);
+            useViberon.getState().appendToLastAssistant(event.text, sessionId);
             break;
 
           case "file_change": {
             const state = useViberon.getState();
             // Surface what the agent is writing as a preview tab, but never
-            // steal focus from a file the user is editing.
+            // steal focus from a file the user is editing, and never for a
+            // session that is not on screen (or edits its own worktree).
             const current = state.tabs.find((t) => t.path === state.activeTabPath);
-            if (event.kind !== "delete" && !current?.dirty && state.appMode === "ide") {
+            const isolated = state.sessions.find((s) => s.id === sessionId)?.mode === "isolated";
+            if (
+              onScreen() &&
+              !isolated &&
+              event.kind !== "delete" &&
+              !current?.dirty &&
+              state.appMode === "ide"
+            ) {
               state.openTab(event.path, event.after, { preview: true });
             }
             break;
           }
+
+          case "approval_request":
+            if (!onScreen()) notifyBackground(sessionId, "approval", event.title);
+            break;
 
           case "command": {
             if (isMockMode()) {
@@ -378,7 +467,7 @@ async function pumpRun({
             finalStatus = event.status ?? "done";
             const state = useViberon.getState();
             if (conversational && event.summary && !answeredInline) {
-              state.appendToLastAssistant(event.summary);
+              state.appendToLastAssistant(event.summary, sessionId);
             }
             break;
           }
@@ -391,26 +480,55 @@ async function pumpRun({
     }
 
     flush();
-    useViberon.getState().endRun(finalStatus ?? "done");
+    useViberon.getState().endRun(finalStatus ?? "done", sessionId);
+    if (!onScreen() && finalStatus !== "cancelled") {
+      notifyBackground(sessionId, finalStatus === "failed" ? "error" : "done");
+    }
   } catch (error) {
     flush();
     const aborted = error instanceof DOMException && error.name === "AbortError";
     const state = useViberon.getState();
     if (aborted || finalStatus === "cancelled") {
-      if (conversational) state.appendToLastAssistant("\n\n_Stopped._");
-      state.endRun("cancelled");
+      if (conversational) state.appendToLastAssistant("\n\n_Stopped._", sessionId);
+      state.endRun("cancelled", sessionId);
     } else {
       const message = error instanceof Error ? error.message : String(error);
-      toast.error(message);
-      if (conversational) state.appendToLastAssistant(`\n\n**Run failed.** ${message}`);
-      state.endRun("failed");
+      if (onScreen()) toast.error(message);
+      else notifyBackground(sessionId, "error", message);
+      if (conversational) state.appendToLastAssistant(`\n\n**Run failed.** ${message}`, sessionId);
+      state.endRun("failed", sessionId);
     }
   } finally {
     if (flushHandle !== null) window.cancelAnimationFrame(flushHandle);
-    if (activeController === controller) activeController = null;
-    activeRunId = null;
+    if (live.get(key) === stream) live.delete(key);
     void refreshWorkspace();
   }
+}
+
+/**
+ * Tell the user about a session that is not on screen: it is waiting on an
+ * approval, finished, or failed. The toast's action switches to it.
+ */
+function notifyBackground(
+  sessionId: string | null,
+  kind: "approval" | "done" | "error",
+  detail?: string,
+): void {
+  if (!sessionId) return;
+  const session = useViberon.getState().sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+  const name = `"${session.title}"`;
+  notifySession({
+    tone: kind,
+    title:
+      kind === "approval"
+        ? `Session ${name} needs your approval`
+        : kind === "done"
+          ? `Session ${name} finished`
+          : `Session ${name} failed`,
+    body: detail,
+    onOpen: () => useViberon.getState().switchSession(sessionId),
+  });
 }
 
 /** Execute a plan the user reviewed (and possibly edited). */

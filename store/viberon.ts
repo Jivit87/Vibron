@@ -17,6 +17,13 @@ import {
   type RunState,
 } from "@/lib/client/run-reducer";
 import { isMockMode } from "@/lib/client/mock-run";
+import type { RunStatus } from "@/lib/agents/events";
+import type {
+  SessionLedger,
+  SessionMode,
+  SessionStatus,
+  SessionSummary,
+} from "@/lib/sessions/types";
 import type { LedgerSnapshot } from "@/lib/context/ledger";
 import type { ProjectMemory } from "@/lib/memory/types";
 import {
@@ -66,6 +73,40 @@ export type {
   RunState,
   ToolCallRecord,
 } from "@/lib/client/run-reducer";
+
+/* ----------------------------- sessions --------------------------------- */
+
+/**
+ * The per-session half of the chat state. The *active* session's slice lives
+ * in the top-level fields (`messages`, `run`, `streaming`, …) so every panel
+ * keeps rendering from the same place; a background session's slice is kept
+ * on its `ClientSession` and keeps receiving events while it streams.
+ */
+export interface SessionSlice {
+  messages: ChatMessage[];
+  run: RunState | null;
+  runHistory: RunState[];
+  streaming: boolean;
+  conversationId: string;
+  conversationRuns: StoredRun[];
+}
+
+export interface ClientSession {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  model: string;
+  mode: SessionMode;
+  createdAt: number;
+  /** Position in the server's run queue while `queued`. */
+  queuePosition: number | null;
+  /** Something happened while it was in the background that the user should see. */
+  attention: "approval" | "done" | "error" | null;
+  ledger?: SessionLedger;
+  worktree?: { path: string; repoKey: string };
+  /** Background state; null while this is the active session (state is top-level). */
+  slice: SessionSlice | null;
+}
 
 /* ------------------------------ editor ---------------------------------- */
 
@@ -227,11 +268,137 @@ function basename(path: string): string {
  * saved. The save path re-derives title/preview, so only identity matters.
  */
 function currentMeta(state: ViberonState): ConversationMeta {
-  const existing = state.conversations.find((c) => c.id === state.conversationId);
+  return metaFor(state, state.conversationId);
+}
+
+function metaFor(state: ViberonState, conversationId: string): ConversationMeta {
+  const existing = state.conversations.find((c) => c.id === conversationId);
   if (existing) return existing;
   return {
     ...createConversationMeta(),
-    id: state.conversationId || createConversationMeta().id,
+    id: conversationId || createConversationMeta().id,
+  };
+}
+
+/* --------------------------- session slices ------------------------------ */
+
+function sliceOf(state: ViberonState): SessionSlice {
+  return {
+    messages: state.messages,
+    run: state.run,
+    runHistory: state.runHistory,
+    streaming: state.streaming,
+    conversationId: state.conversationId,
+    conversationRuns: state.conversationRuns,
+  };
+}
+
+/** A session's thread as stored, or a fresh one. */
+function loadSlice(repoKey: string, conversationId: string | null): SessionSlice {
+  const id = conversationId || createConversationMeta().id;
+  const record = repoKey && conversationId ? loadConversation(repoKey, conversationId) : null;
+  return {
+    messages: record?.messages ?? [],
+    run: null,
+    runHistory: [],
+    streaming: false,
+    conversationId: id,
+    conversationRuns: record?.runs ?? [],
+  };
+}
+
+function isActiveTarget(state: ViberonState, sessionId?: string | null): boolean {
+  return !sessionId || !state.activeSessionId || sessionId === state.activeSessionId;
+}
+
+/**
+ * Apply `fn` to the slice of `sessionId`: the top-level fields for the
+ * active session, the stored slice for a background one. An unknown session
+ * (closed while its stream was still draining) is ignored.
+ */
+function updateSlice(
+  state: ViberonState,
+  sessionId: string | null | undefined,
+  fn: (slice: SessionSlice) => Partial<SessionSlice> | null,
+): Partial<ViberonState> {
+  if (isActiveTarget(state, sessionId)) return fn(sliceOf(state)) ?? {};
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session) return {};
+  const slice = session.slice ?? loadSlice(state.repoKey, null);
+  const patch = fn(slice);
+  if (!patch) return {};
+  return {
+    sessions: state.sessions.map((s) =>
+      s.id === sessionId ? { ...s, slice: { ...slice, ...patch } } : s,
+    ),
+  };
+}
+
+/** Merge meta fields into one session (after any slice update in `base`). */
+function patchSessionMeta(
+  state: ViberonState,
+  base: Partial<ViberonState>,
+  sessionId: string | null | undefined,
+  patch: Partial<Omit<ClientSession, "slice" | "id">>,
+): Partial<ViberonState> {
+  const id = sessionId ?? state.activeSessionId;
+  if (!id) return base;
+  const sessions = base.sessions ?? state.sessions;
+  if (!sessions.some((s) => s.id === id)) return base;
+  return { ...base, sessions: sessions.map((s) => (s.id === id ? { ...s, ...patch } : s)) };
+}
+
+function statusAfterRun(status: RunState["status"]): SessionStatus {
+  if (status === "cancelled") return "idle";
+  if (status === "failed") return "error";
+  return "done";
+}
+
+/**
+ * Make `id` the active session: park the current top-level slice on the
+ * session it belongs to (saving its thread) and load the target's slice
+ * into the top-level fields. Pure over the state, so both `switchSession`
+ * and `switchConversation` (a thread owned by another session) use it.
+ */
+function switchSessionState(state: ViberonState, id: string): Partial<ViberonState> {
+  if (id === state.activeSessionId) return {};
+  const target = state.sessions.find((s) => s.id === id);
+  if (!target) return {};
+  const current = sliceOf(state);
+  if (state.repoKey && current.messages.length > 0) {
+    saveConversation(state.repoKey, {
+      meta: currentMeta(state),
+      messages: current.messages,
+      runs: current.conversationRuns,
+    });
+  }
+  const next = target.slice ?? loadSlice(state.repoKey, null);
+  return {
+    activeSessionId: id,
+    sessions: state.sessions.map((s) => {
+      if (s.id === state.activeSessionId) return { ...s, slice: current };
+      if (s.id === id) return { ...s, slice: null, attention: null };
+      return s;
+    }),
+    ...next,
+    conversations: state.repoKey ? loadIndex(state.repoKey) : state.conversations,
+    pulseIds: [],
+  };
+}
+
+function toClientSession(summary: SessionSummary, slice: SessionSlice | null): ClientSession {
+  return {
+    id: summary.id,
+    title: summary.title,
+    status: summary.status,
+    model: summary.model,
+    mode: summary.mode,
+    createdAt: summary.createdAt,
+    queuePosition: summary.queuePosition,
+    attention: null,
+    ledger: summary.ledger,
+    worktree: summary.worktree,
+    slice,
   };
 }
 
@@ -309,6 +476,14 @@ export interface ViberonState {
   runHistory: RunState[];
   streaming: boolean;
 
+  /* sessions */
+  /** Every agent session in this workspace, in tab order. */
+  sessions: ClientSession[];
+  /** The session whose state is in the top-level chat fields. */
+  activeSessionId: string | null;
+  /** Server-side cap on concurrently running sessions (runs beyond it queue). */
+  sessionLimit: number;
+
   /* conversations */
   /** Active thread. Messages above belong to this conversation. */
   conversationId: string;
@@ -370,8 +545,8 @@ export interface ViberonState {
   openSettingsTab: () => void;
   openReviewTab: () => void;
 
-  appendMessage: (role: ChatRole, content: string) => string;
-  appendToLastAssistant: (chunk: string) => void;
+  appendMessage: (role: ChatRole, content: string, sessionId?: string | null) => string;
+  appendToLastAssistant: (chunk: string, sessionId?: string | null) => void;
   setMessages: (messages: ChatMessage[]) => void;
   clearConversation: () => void;
 
@@ -391,12 +566,31 @@ export interface ViberonState {
     model: string;
     mode: AgentMode;
     interaction?: Interaction;
+    sessionId?: string | null;
   }) => void;
-  applyEvent: (event: OrchestrationEvent) => void;
-  endRun: (status: RunState["status"]) => void;
+  /** Feed a run event to a session (default: the active one). */
+  applyEvent: (event: OrchestrationEvent, sessionId?: string | null) => void;
+  endRun: (status: RunState["status"], sessionId?: string | null) => void;
   markChangeReverted: (changeId: string) => void;
   dismissApproval: (approvalId: string) => void;
-  resolveApproval: (approvalId: string, resolution: ApprovalResolution) => void;
+  resolveApproval: (
+    approvalId: string,
+    resolution: ApprovalResolution,
+    sessionId?: string | null,
+  ) => void;
+
+  /** Merge the server's session list: update meta, add new, drop gone idle ones. */
+  setSessions: (summaries: SessionSummary[]) => void;
+  /** Adopt `id` as the active session for the thread already on screen. */
+  bindActiveSession: (id: string) => void;
+  /** Add a session; `activate` also switches to it (with an empty thread). */
+  addSession: (summary: SessionSummary, options?: { activate?: boolean }) => void;
+  switchSession: (id: string) => void;
+  removeSession: (id: string) => void;
+  patchSession: (id: string, patch: Partial<Omit<ClientSession, "id" | "slice">>) => void;
+  setSessionLimit: (limit: number) => void;
+  /** A session whose run is still streaming, by id (active or background). */
+  sessionStreaming: (id: string | null) => boolean;
   /** Replace the plan while it awaits approval (user edits). */
   updatePlan: (plan: RunPlan) => void;
   setReviewDecisions: (decisions: Record<string, ReviewDecision>) => void;
@@ -426,7 +620,7 @@ const REVIEW_TAB: EditorTab = { path: REVIEW_TAB_PATH, label: "Review changes" }
 
 const MAX_RUN_HISTORY = 10;
 
-export const useViberon = create<ViberonState>((set) => ({
+export const useViberon = create<ViberonState>((set, get) => ({
   repoKey: "",
   repoLabel: "Workspace",
   rootPath: undefined,
@@ -460,6 +654,10 @@ export const useViberon = create<ViberonState>((set) => ({
   conversations: [],
   conversationRuns: [],
 
+  sessions: [],
+  activeSessionId: null,
+  sessionLimit: 3,
+
   terminals: [],
   activeTerminalId: null,
 
@@ -474,7 +672,9 @@ export const useViberon = create<ViberonState>((set) => ({
   /* ---------------------------- identity ---------------------------- */
 
   init: ({ repoKey, repoLabel, rootPath }) =>
-    set({
+    set((state) => ({
+      // Sessions belong to a workspace; opening another one starts clean.
+      ...(state.repoKey === repoKey ? {} : { sessions: [], activeSessionId: null }),
       repoKey,
       repoLabel,
       rootPath,
@@ -483,7 +683,7 @@ export const useViberon = create<ViberonState>((set) => ({
       selectedNodeId: undefined,
       pulseIds: [],
       expandedFolders: new Set<string>(),
-    }),
+    })),
 
   setGraph: (graph) => set({ graph }),
   setFileList: (fileList) => set({ fileList }),
@@ -581,29 +781,33 @@ export const useViberon = create<ViberonState>((set) => ({
 
   /* ------------------------------ chat ------------------------------ */
 
-  appendMessage: (role, content) => {
+  appendMessage: (role, content, sessionId) => {
     const id = nextId("msg");
-    set((state) => ({
-      messages: [...state.messages, { id, role, content, at: Date.now() }],
-    }));
+    set((state) =>
+      updateSlice(state, sessionId, (slice) => ({
+        messages: [...slice.messages, { id, role, content, at: Date.now() }],
+      })),
+    );
     return id;
   },
 
-  appendToLastAssistant: (chunk) =>
-    set((state) => {
-      const last = state.messages.at(-1);
-      if (last?.role === "assistant") {
-        const messages = state.messages.slice(0, -1);
-        messages.push({ ...last, content: last.content + chunk });
-        return { messages };
-      }
-      return {
-        messages: [
-          ...state.messages,
-          { id: nextId("msg"), role: "assistant", content: chunk, at: Date.now() },
-        ],
-      };
-    }),
+  appendToLastAssistant: (chunk, sessionId) =>
+    set((state) =>
+      updateSlice(state, sessionId, (slice) => {
+        const last = slice.messages.at(-1);
+        if (last?.role === "assistant") {
+          const messages = slice.messages.slice(0, -1);
+          messages.push({ ...last, content: last.content + chunk });
+          return { messages };
+        }
+        return {
+          messages: [
+            ...slice.messages,
+            { id: nextId("msg"), role: "assistant", content: chunk, at: Date.now() },
+          ],
+        };
+      }),
+    ),
 
   setMessages: (messages) => set({ messages }),
 
@@ -675,6 +879,12 @@ export const useViberon = create<ViberonState>((set) => ({
   switchConversation: (id) =>
     set((state) => {
       if (id === state.conversationId) return state;
+      // A thread another session is working in: go to that session instead
+      // of opening the same thread twice.
+      const owner = state.sessions.find(
+        (s) => s.id !== state.activeSessionId && s.slice?.conversationId === id,
+      );
+      if (owner) return switchSessionState(state, owner.id);
       if (state.repoKey && state.messages.length > 0) {
         saveConversation(state.repoKey, {
           meta: currentMeta(state),
@@ -734,96 +944,166 @@ export const useViberon = create<ViberonState>((set) => ({
 
   persistConversation: () =>
     set((state) => {
-      if (!state.repoKey || state.messages.length === 0) return state;
-      return {
-        conversations: saveConversation(state.repoKey, {
-          meta: currentMeta(state),
+      if (!state.repoKey) return state;
+      let conversations = state.conversations;
+      // Background sessions stream too; their threads are saved alongside.
+      for (const session of state.sessions) {
+        const slice = session.slice;
+        if (!slice || slice.messages.length === 0) continue;
+        conversations = saveConversation(state.repoKey, {
+          meta: metaFor({ ...state, conversations }, slice.conversationId),
+          messages: slice.messages,
+          runs: slice.conversationRuns,
+        });
+      }
+      if (state.messages.length > 0) {
+        conversations = saveConversation(state.repoKey, {
+          meta: metaFor({ ...state, conversations }, state.conversationId),
           messages: state.messages,
           runs: state.conversationRuns,
-        }),
-      };
+        });
+      }
+      return conversations === state.conversations ? state : { conversations };
     }),
 
   /* ----------------------------- agents ----------------------------- */
 
-  startRun: ({ prompt, model, mode, interaction = "agent" }) =>
-    set({
-      streaming: true,
-      run: createRun({
-        id: nextId("run"),
-        prompt,
-        model,
-        mode:
-          interaction === "plan"
-            ? "plan"
-            : mode === "single" || interaction === "fix"
-              ? "single"
-              : "orchestrated",
-        now: Date.now(),
-        interaction,
-      }),
+  startRun: ({ prompt, model, mode, interaction = "agent", sessionId }) =>
+    set((state) => {
+      const base = updateSlice(state, sessionId, () => ({
+        streaming: true,
+        run: createRun({
+          id: nextId("run"),
+          prompt,
+          model,
+          mode:
+            interaction === "plan"
+              ? "plan"
+              : mode === "single" || interaction === "fix"
+                ? "single"
+                : "orchestrated",
+          now: Date.now(),
+          interaction,
+        }),
+      }));
+      return patchSessionMeta(state, base, sessionId, {
+        status: "running",
+        queuePosition: null,
+        attention: null,
+      });
     }),
 
-  applyEvent: (event) =>
+  applyEvent: (event, sessionId) =>
     set((state) => {
-      if (!state.run) return state;
-      const run = reduceRun(state.run, event, { now: Date.now(), nextId });
-      if (event.type !== "file_change") return { run };
-      // Mirror into any open tab so the editor shows the change live.
+      const background = !isActiveTarget(state, sessionId);
+      let base = updateSlice(state, sessionId, (slice) =>
+        slice.run ? { run: reduceRun(slice.run, event, { now: Date.now(), nextId }) } : null,
+      );
+
+      // Session status mirrors what the run is doing.
+      const meta: Partial<ClientSession> = {};
+      switch (event.type) {
+        case "session":
+          meta.status = event.status;
+          meta.queuePosition = event.status === "queued" ? (event.position ?? null) : null;
+          break;
+        case "run_start":
+          meta.status = "running";
+          meta.queuePosition = null;
+          break;
+        case "approval_request":
+          meta.status = "awaiting-approval";
+          if (background) meta.attention = "approval";
+          break;
+        case "approval_resolved": {
+          const slice = isActiveTarget(state, sessionId)
+            ? state
+            : state.sessions.find((s) => s.id === sessionId)?.slice;
+          const open = slice?.run?.approvals.filter(
+            (a) => !a.resolution && a.approvalId !== event.approvalId,
+          ).length;
+          if (!open) meta.status = "running";
+          break;
+        }
+        default:
+          break;
+      }
+      if (Object.keys(meta).length) base = patchSessionMeta(state, base, sessionId, meta);
+
+      if (event.type !== "file_change") return base;
+      // Mirror into any open tab so the editor shows the change live. An
+      // isolated session edits its own worktree, not the files on screen.
+      const session = state.sessions.find((s) => s.id === (sessionId ?? state.activeSessionId));
+      if (session?.mode === "isolated") return base;
       const tabs = state.tabs.map((tab) =>
         tab.path === event.path ? { ...tab, source: event.after, dirty: false } : tab,
       );
-      return { run, tabs };
+      return { ...base, tabs };
     }),
 
-  endRun: (status) =>
+  endRun: (status, sessionId) =>
     set((state) => {
-      if (!state.run) return { streaming: false };
-      const finished: RunState = {
-        ...state.run,
-        // The server's `run_done.status` wins over the transport's guess.
-        status:
-          state.run.status === "failed" || state.run.status === "cancelled"
-            ? state.run.status
-            : state.run.status === "done"
-              ? "done"
-              : status,
-        endedAt: state.run.endedAt ?? Date.now(),
-      };
+      const background = !isActiveTarget(state, sessionId);
+      let finalStatus: RunState["status"] = status;
+      const base = updateSlice(state, sessionId, (slice) => {
+        if (!slice.run) return { streaming: false };
+        const finished: RunState = {
+          ...slice.run,
+          // The server's `run_done.status` wins over the transport's guess.
+          status:
+            slice.run.status === "failed" || slice.run.status === "cancelled"
+              ? slice.run.status
+              : slice.run.status === "done"
+                ? "done"
+                : status,
+          endedAt: slice.run.endedAt ?? Date.now(),
+        };
+        finalStatus = finished.status;
 
-      // Tie the run to the assistant message it produced so the history and
-      // changes panels can scroll straight to the reply it belongs to.
-      const lastAssistant = [...state.messages]
-        .reverse()
-        .find((m) => m.role === "assistant");
-      const messages = lastAssistant
-        ? state.messages.map((m) =>
-            m.id === lastAssistant.id ? { ...m, runId: finished.id } : m,
-          )
-        : state.messages;
+        // Tie the run to the assistant message it produced so the history and
+        // changes panels can scroll straight to the reply it belongs to.
+        const lastAssistant = [...slice.messages]
+          .reverse()
+          .find((m) => m.role === "assistant");
+        const messages = lastAssistant
+          ? slice.messages.map((m) =>
+              m.id === lastAssistant.id ? { ...m, runId: finished.id } : m,
+            )
+          : slice.messages;
 
-      const conversationRuns = [
-        ...state.conversationRuns,
-        toStoredRun(finished, lastAssistant?.id),
-      ];
+        const conversationRuns = [
+          ...slice.conversationRuns,
+          toStoredRun(finished, lastAssistant?.id),
+        ];
 
-      // Persist immediately: a finished run is exactly the moment a user
-      // might close the window, and losing it would lose the thread.
-      const conversations = state.repoKey
-        ? saveConversation(state.repoKey, {
-            meta: currentMeta(state),
+        // Persist immediately: a finished run is exactly the moment a user
+        // might close the window, and losing it would lose the thread.
+        if (state.repoKey) {
+          saveConversation(state.repoKey, {
+            meta: metaFor(state, slice.conversationId),
             messages,
             runs: conversationRuns,
-          })
-        : state.conversations;
+          });
+        }
 
+        return {
+          streaming: false,
+          run: finished,
+          messages,
+          conversationRuns,
+          runHistory: [finished, ...slice.runHistory].slice(0, MAX_RUN_HISTORY),
+        };
+      });
+      const withMeta = patchSessionMeta(state, base, sessionId, {
+        status: statusAfterRun(finalStatus),
+        queuePosition: null,
+        ...(background && finalStatus !== "cancelled"
+          ? { attention: finalStatus === "failed" ? ("error" as const) : ("done" as const) }
+          : {}),
+      });
       return {
-        streaming: false,
-        run: finished,
-        messages,
-        conversationRuns,
-        conversations,
-        runHistory: [finished, ...state.runHistory].slice(0, MAX_RUN_HISTORY),
+        ...withMeta,
+        conversations: state.repoKey ? loadIndex(state.repoKey) : state.conversations,
       };
     }),
 
@@ -853,18 +1133,124 @@ export const useViberon = create<ViberonState>((set) => ({
       };
     }),
 
-  resolveApproval: (approvalId, resolution) =>
+  resolveApproval: (approvalId, resolution, sessionId) =>
+    set((state) =>
+      updateSlice(state, sessionId, (slice) =>
+        slice.run
+          ? {
+              run: {
+                ...slice.run,
+                approvals: slice.run.approvals.map((a) =>
+                  a.approvalId === approvalId ? { ...a, resolution } : a,
+                ),
+              },
+            }
+          : null,
+      ),
+    ),
+
+  /* ---------------------------- sessions ---------------------------- */
+
+  setSessions: (summaries) =>
     set((state) => {
-      if (!state.run) return state;
+      const known = new Map(state.sessions.map((s) => [s.id, s] as const));
+      const incoming = new Set(summaries.map((s) => s.id));
+      const sessions: ClientSession[] = summaries.map((summary) => {
+        const existing = known.get(summary.id);
+        if (!existing) {
+          return toClientSession(summary, loadSlice(state.repoKey, summary.conversationId));
+        }
+        const streaming =
+          existing.id === state.activeSessionId ? state.streaming : Boolean(existing.slice?.streaming);
+        return {
+          ...existing,
+          title: summary.title,
+          model: summary.model,
+          mode: summary.mode,
+          ledger: summary.ledger,
+          worktree: summary.worktree,
+          // A live stream is fresher than a poll; otherwise the server knows best.
+          ...(streaming ? {} : { status: summary.status, queuePosition: summary.queuePosition }),
+        };
+      });
+      // Keep a session the server forgot only while it is still streaming here.
+      for (const session of state.sessions) {
+        if (incoming.has(session.id)) continue;
+        const streaming =
+          session.id === state.activeSessionId ? state.streaming : Boolean(session.slice?.streaming);
+        if (streaming) sessions.push(session);
+      }
+      const next: Partial<ViberonState> = { sessions };
+      if (state.activeSessionId && !sessions.some((s) => s.id === state.activeSessionId)) {
+        next.activeSessionId = null;
+      }
+      return next;
+    }),
+
+  bindActiveSession: (id) =>
+    set((state) => ({
+      activeSessionId: id,
+      sessions: state.sessions.map((s) => (s.id === id ? { ...s, slice: null, attention: null } : s)),
+    })),
+
+  addSession: (summary, options = {}) =>
+    set((state) => {
+      if (state.sessions.some((s) => s.id === summary.id)) {
+        return options.activate ? switchSessionState(state, summary.id) : state;
+      }
+      const added: ClientSession = toClientSession(
+        summary,
+        loadSlice(state.repoKey, summary.conversationId),
+      );
+      const withSession = { ...state, sessions: [...state.sessions, added] };
+      if (!options.activate) return { sessions: withSession.sessions };
+      if (!state.activeSessionId) {
+        // Nothing to park: the new session simply takes over the screen.
+        return {
+          sessions: withSession.sessions.map((s) => (s.id === added.id ? { ...s, slice: null } : s)),
+          activeSessionId: added.id,
+          ...added.slice!,
+        };
+      }
+      return { sessions: withSession.sessions, ...switchSessionState(withSession, added.id) };
+    }),
+
+  switchSession: (id) => set((state) => switchSessionState(state, id)),
+
+  removeSession: (id) =>
+    set((state) => {
+      if (!state.sessions.some((s) => s.id === id)) return state;
+      if (id !== state.activeSessionId) {
+        return { sessions: state.sessions.filter((s) => s.id !== id) };
+      }
+      const fallback = state.sessions.find((s) => s.id !== id);
+      if (fallback) {
+        const switched = switchSessionState(state, fallback.id);
+        return {
+          ...switched,
+          sessions: (switched.sessions ?? state.sessions).filter((s) => s.id !== id),
+        };
+      }
       return {
-        run: {
-          ...state.run,
-          approvals: state.run.approvals.map((a) =>
-            a.approvalId === approvalId ? { ...a, resolution } : a,
-          ),
-        },
+        sessions: [],
+        activeSessionId: null,
+        ...loadSlice(state.repoKey, null),
+        conversations: state.repoKey ? loadIndex(state.repoKey) : state.conversations,
       };
     }),
+
+  patchSession: (id, patch) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+    })),
+
+  setSessionLimit: (sessionLimit) => set({ sessionLimit }),
+
+  sessionStreaming: (id) => {
+    const state = get();
+    if (isActiveTarget(state, id)) return state.streaming;
+    return Boolean(state.sessions.find((s) => s.id === id)?.slice?.streaming);
+  },
 
   updatePlan: (plan) =>
     set((state) => (state.run ? { run: { ...state.run, plan } } : state)),
@@ -940,3 +1326,4 @@ export function resolveTheme(theme: ThemeSetting): "dark" | "light" {
 export { nextId };
 export type { RunPlan, PlanStep, LedgerSnapshot, ProjectMemory, ReviewDecision };
 export type { ConversationMeta, StoredRun };
+export type { RunStatus, SessionStatus };

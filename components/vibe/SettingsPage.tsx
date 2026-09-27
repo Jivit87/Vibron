@@ -16,6 +16,7 @@ import { GithubMcpSettings } from "@/components/vibe/GithubMcpSettings";
 import { McpMarketplace } from "@/components/vibe/McpMarketplace";
 import { HooksSettings } from "@/components/vibe/HooksSettings";
 import { EgressSettings } from "@/components/vibe/EgressSettings";
+import { saveSessionLimit } from "@/lib/client/sessions";
 
 interface ProviderStatus {
   provider: "anthropic" | "groq" | "openai" | "nvidia" | "gemini";
@@ -75,6 +76,7 @@ type CategoryId = (typeof CATEGORIES)[number]["id"];
 
 export function SettingsPage() {
   const settings = useViberon((s) => s.settings);
+  const sessionLimit = useViberon((s) => s.sessionLimit);
   const setSettings = useViberon((s) => s.setSettings);
   const resetSettings = useViberon((s) => s.resetSettings);
   const rootPath = useViberon((s) => s.rootPath);
@@ -213,6 +215,14 @@ export function SettingsPage() {
               {show("parallel specialists concurrency") && (
                 <Row label="Parallel specialists" hint="Higher finishes sooner but hits provider rate limits more often.">
                   <NumberInput value={settings.concurrency} min={1} max={6} onChange={set("concurrency")} />
+                </Row>
+              )}
+              {show("concurrent sessions limit queue parallel runs") && (
+                <Row
+                  label="Concurrent sessions"
+                  hint="How many sessions may run at once in a workspace. Runs beyond this wait in a queue and start as slots free up."
+                >
+                  <NumberInput value={sessionLimit} min={1} max={12} onChange={(n) => void saveSessionLimit(n)} />
                 </Row>
               )}
               {show("show reasoning thinking") && (

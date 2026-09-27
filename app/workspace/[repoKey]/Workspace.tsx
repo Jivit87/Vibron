@@ -14,6 +14,7 @@ import { AppShell } from "@/components/vibe/AppShell";
 import { ProgressBar } from "@/components/ProgressBar";
 import type { Graph } from "@/lib/graph";
 import { sendPrompt } from "@/lib/client/agent-stream";
+import { hydrateSessions, watchSessionConversations } from "@/lib/client/sessions";
 import { useViberon } from "@/store/viberon";
 
 export interface WorkspaceProps {
@@ -44,6 +45,10 @@ export function Workspace({
     const store = useViberon.getState();
     store.hydrateConversations(repoKey);
     if (initialQuery) store.newConversation();
+    // Then bind the workspace's agent sessions to those threads.
+    void hydrateSessions(repoKey);
+    const unwatch = watchSessionConversations();
+    return unwatch;
   }, [repoKey, initialQuery]);
 
   // Persist on change, debounced. Streaming mutates `messages` on nearly
@@ -53,7 +58,8 @@ export function Workspace({
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const unsubscribe = useViberon.subscribe((state, previous) => {
-      if (state.messages === previous.messages) return;
+      // Background sessions stream into their own slices; save those too.
+      if (state.messages === previous.messages && state.sessions === previous.sessions) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => useViberon.getState().persistConversation(), 600);
     });

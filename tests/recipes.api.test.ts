@@ -10,6 +10,8 @@ import type { OrchestrationEvent } from "@/lib/agents/events";
 import { RUN_ID_HEADER } from "@/lib/harness/contracts";
 import { registerLocalWorkspace } from "@/lib/local-disk-workspace";
 import { repoRecipesDir } from "@/lib/recipes/store";
+import { getSessionManager } from "@/lib/sessions";
+import { resetRunsForTests } from "@/lib/harness/runs";
 import { resetMemoryStoreForTests } from "@/lib/store";
 import { installFakeProvider, uninstallFakeProvider } from "./helpers/fake-provider";
 import { makeTmpRepo, type TmpRepo } from "./helpers/tmp-repo";
@@ -161,6 +163,46 @@ describe("POST /api/recipes/run", () => {
     expect(failed).toMatchObject({ agentId: "listing", error: expect.stringMatching(/command policy: never/) });
     expect(events.at(-1)).toMatchObject({ type: "run_done", status: "failed" });
     expect(existsSync(path.join(repo.root, "made.txt"))).toBe(false);
+  });
+});
+
+describe("POST /api/recipes/run in a session", () => {
+  const run = (body: unknown) => RUN(new Request("http://localhost/api/recipes/run", { method: "POST", body: JSON.stringify(body) }));
+  afterEach(async () => {
+    (await getSessionManager()).reset();
+    resetRunsForTests();
+  });
+
+  it("rejects a session that is unknown or belongs to another workspace", async () => {
+    expect((await run({ repoKey, name: "demo", sessionId: "ses_missing" })).status).toBe(404);
+    const other = await (await getSessionManager()).create({ repoKey: "other-repo" });
+    expect((await run({ repoKey, name: "demo", sessionId: other.id })).status).toBe(404);
+  });
+
+  it("runs as the session's run: session checkpoint, status and ledger", async () => {
+    installFakeProvider();
+    const manager = await getSessionManager();
+    const session = await manager.create({ repoKey });
+    const res = await run({ repoKey, name: "demo", model: "claude-opus-5", commandPolicy: "auto", sessionId: session.id });
+    expect(res.status).toBe(200);
+    const events = await readEvents(res);
+    expect(events.at(-1)).toMatchObject({ type: "run_done", status: "done" });
+    const after = manager.get(session.id)!;
+    expect(after.status).toBe("done");
+    expect(after.runId === null || after.runId === res.headers.get(RUN_ID_HEADER)).toBe(true);
+    const checkpoint = events.find((e) => e.type === "checkpoint");
+    expect(checkpoint).toBeTruthy();
+    expect(after.checkpointIds).toContain((checkpoint as { id: string }).id);
+  });
+
+  it("refuses a second run while the session is busy", async () => {
+    installFakeProvider();
+    const manager = await getSessionManager();
+    const session = await manager.create({ repoKey });
+    const first = await run({ repoKey, name: "demo", model: "claude-opus-5", commandPolicy: "auto", sessionId: session.id });
+    const second = await run({ repoKey, name: "demo", model: "claude-opus-5", commandPolicy: "auto", sessionId: session.id });
+    expect(second.status).toBe(409);
+    await readEvents(first);
   });
 });
 
