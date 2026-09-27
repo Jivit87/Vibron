@@ -12,6 +12,7 @@
  *   viberon issues [--repo <path>] [--label <l>] [--fix <n,n|all>] [--no-deliver] [--model <id>] [--json]
  *   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
  *   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+ *   viberon recipe list|show|validate|run|import … (see USAGE)
  */
 
 export const USAGE = `Usage:
@@ -38,8 +39,21 @@ export const USAGE = `Usage:
       worktree of origin/<default>, and opens a draft PR for every fix its checks prove
   viberon clone <url|owner/repo|issue-url> [--ref <ref>] [--depth <n>] [--setup] [--json]
   viberon eval [--only a,b] [--model <id>] [--max-turns <n>] [--timeout <sec>]
+  viberon recipe list [--repo <path>] [--json]
+  viberon recipe show <name|file> [--repo <path>] [--json]
+  viberon recipe validate <name|file> [--repo <path>] [--json]
+  viberon recipe run <name|file> [--param k=v]... [--repo <path>] [options]
+      --param k=v         a recipe parameter (repeatable)
+      --allow-commands    run shell commands that are not on the auto-approve list
+                          (blocked commands never run)
+      --worktree, --keep-worktree, --out <dir>, --max-turns <n>, --timeout <sec>,
+      --model <id>, --json as for run
+  viberon recipe import <https-url|file> [--repo <path> | --global] [--force]
+      validates, then saves to <repo>/.viberon/recipes (with --repo) or the global
+      recipe dir ($VIBERON_RECIPES_DIR, default ~/Viberon/recipes)
 
 Exit codes (run): 0 resolved/unverified, 1 failed/incomplete, 2 error (delivery never changes them).
+Exit codes (recipe run): as run. (recipe validate/import): 0 ok, 1 invalid recipe, 2 error.
 Exit codes (review): 0 reviewed, 2 error.
 Exit codes (issues): 0 listed / every fix succeeded, 1 some fix failed, 2 error.`;
 
@@ -100,11 +114,35 @@ export interface EvalArgs {
   timeoutSec?: number;
 }
 
-export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | { command: "help" };
+export type RecipeAction = "list" | "show" | "validate" | "run" | "import";
+
+export interface RecipeArgs {
+  command: "recipe";
+  action: RecipeAction;
+  /** Recipe name or file (show/validate/run), or URL/file (import). */
+  target?: string;
+  repo?: string;
+  params: Record<string, string>;
+  json: boolean;
+  allowCommands: boolean;
+  worktree: boolean;
+  keepWorktree: boolean;
+  out?: string;
+  maxTurns?: number;
+  timeoutSec?: number;
+  model?: string;
+  global: boolean;
+  force: boolean;
+}
+
+export type CliArgs = RunArgs | ReviewArgs | IssuesArgs | CloneArgs | EvalArgs | RecipeArgs | { command: "help" };
 
 export class CliError extends Error {}
 
-const BOOLEAN_FLAGS = new Set(["worktree", "keep-worktree", "no-gate", "json", "setup", "help", "deliver", "review", "no-deliver"]);
+const BOOLEAN_FLAGS = new Set([
+  "worktree", "keep-worktree", "no-gate", "json", "setup", "help", "deliver", "review", "no-deliver",
+  "allow-commands", "global", "force",
+]);
 
 function splitFlags(argv: string[]): { flags: Map<string, string | true>; positionals: string[] } {
   const flags = new Map<string, string | true>();
@@ -156,12 +194,101 @@ const KNOWN: Record<string, Set<string>> = {
   issues: new Set(["repo", "label", "fix", "no-deliver", "model", "json", "help"]),
   clone: new Set(["ref", "depth", "setup", "json", "help"]),
   eval: new Set(["only", "model", "max-turns", "timeout", "help"]),
+  recipe: new Set([
+    "repo", "param", "json", "allow-commands", "worktree", "keep-worktree", "out", "max-turns",
+    "timeout", "model", "global", "force", "help",
+  ]),
 };
+
+const RECIPE_ACTIONS: RecipeAction[] = ["list", "show", "validate", "run", "import"];
+/** Flags each recipe action accepts (beyond --help). */
+const RECIPE_FLAGS: Record<RecipeAction, string[]> = {
+  list: ["repo", "json"],
+  show: ["repo", "json"],
+  validate: ["repo", "json"],
+  run: ["repo", "param", "json", "allow-commands", "worktree", "keep-worktree", "out", "max-turns", "timeout", "model"],
+  import: ["repo", "global", "force"],
+};
+
+/** Pull every `--param k=v` / `--param=k=v` out of argv (the only repeatable flag). */
+function extractParams(argv: string[]): { rest: string[]; params: Record<string, string>; seen: boolean } {
+  const rest: string[] = [];
+  const params: Record<string, string> = {};
+  let seen = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (arg === "--") {
+      rest.push(...argv.slice(i));
+      break;
+    }
+    let pair: string | undefined;
+    if (arg === "--param") {
+      pair = argv[++i];
+      if (pair === undefined) throw new CliError("--param needs a value (k=v)");
+    } else if (arg.startsWith("--param=")) {
+      pair = arg.slice("--param=".length);
+    } else {
+      rest.push(arg);
+      continue;
+    }
+    seen = true;
+    const eq = pair.indexOf("=");
+    const key = eq === -1 ? pair : pair.slice(0, eq);
+    if (eq === -1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new CliError(`--param takes name=value, got "${pair}"`);
+    if (key in params) throw new CliError(`--param ${key} was given twice`);
+    params[key] = pair.slice(eq + 1);
+  }
+  return { rest, params, seen };
+}
+
+function parseRecipeArgs(argv: string[]): RecipeArgs | { command: "help" } {
+  const { rest, params, seen } = extractParams(argv);
+  const { flags, positionals } = splitFlags(rest);
+  if (flags.has("help")) return { command: "help" };
+  const [actionRaw, target, ...extra] = positionals;
+  if (!actionRaw) throw new CliError(`recipe: an action is required (${RECIPE_ACTIONS.join(", ")})`);
+  if (!RECIPE_ACTIONS.includes(actionRaw as RecipeAction)) {
+    throw new CliError(`recipe: unknown action "${actionRaw}" (${RECIPE_ACTIONS.join(", ")})`);
+  }
+  const action = actionRaw as RecipeAction;
+  const allowed = new Set(RECIPE_FLAGS[action]);
+  for (const name of flags.keys()) {
+    if (!KNOWN.recipe!.has(name)) throw new CliError(`Unknown option for recipe: --${name}`);
+    if (!allowed.has(name)) throw new CliError(`recipe ${action}: --${name} does not apply`);
+  }
+  if (seen && !allowed.has("param")) throw new CliError(`recipe ${action}: --param does not apply`);
+  if (action === "list" ? target !== undefined : extra.length) {
+    throw new CliError(`recipe ${action}: unexpected argument "${action === "list" ? target : extra[0]}"`);
+  }
+  if (action !== "list" && !target) {
+    throw new CliError(`recipe ${action}: ${action === "import" ? "a URL or file" : "a recipe name or file"} is required`);
+  }
+  if (flags.has("global") && flags.has("repo")) throw new CliError("recipe import: use only one of --repo and --global");
+  if (flags.has("keep-worktree") && !flags.has("worktree")) throw new CliError("recipe run: --keep-worktree needs --worktree");
+  return {
+    command: "recipe",
+    action,
+    ...(target ? { target } : {}),
+    ...(stringFlag(flags, "repo") ? { repo: stringFlag(flags, "repo") } : {}),
+    params,
+    json: flags.has("json"),
+    allowCommands: flags.has("allow-commands"),
+    worktree: flags.has("worktree"),
+    keepWorktree: flags.has("keep-worktree"),
+    ...(stringFlag(flags, "out") ? { out: stringFlag(flags, "out") } : {}),
+    ...(intFlag(flags, "max-turns") ? { maxTurns: intFlag(flags, "max-turns") } : {}),
+    ...(intFlag(flags, "timeout") ? { timeoutSec: intFlag(flags, "timeout") } : {}),
+    ...(stringFlag(flags, "model") ? { model: stringFlag(flags, "model") } : {}),
+    global: flags.has("global"),
+    force: flags.has("force"),
+  };
+}
 
 export function parseCliArgs(argv: string[]): CliArgs {
   const [command, ...rest] = argv;
   if (!command || command === "help" || command === "--help" || command === "-h") return { command: "help" };
   if (!(command in KNOWN)) throw new CliError(`Unknown command: ${command}`);
+  if (command === "recipe") return parseRecipeArgs(rest);
   const { flags, positionals } = splitFlags(rest);
   if (flags.has("help")) return { command: "help" };
   for (const name of flags.keys()) {
@@ -271,6 +398,11 @@ export async function main(argv: string[]): Promise<number> {
   if (args.command === "help") {
     process.stdout.write(`${USAGE}\n`);
     return 0;
+  }
+
+  if (args.command === "recipe") {
+    const { runRecipeCommand } = await import("./recipe");
+    return runRecipeCommand(args, log);
   }
 
   if (args.command === "run") {

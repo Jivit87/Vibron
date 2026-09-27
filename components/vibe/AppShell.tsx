@@ -23,6 +23,7 @@ import { toast } from "sonner";
 
 import { ChatShell } from "@/components/vibe/ChatShell";
 import { CloneDialog } from "@/components/vibe/CloneDialog";
+import { RecipeDialog } from "@/components/vibe/RecipeDialog";
 import { takePendingFix } from "@/lib/client/clone";
 import { CommandPalette } from "@/components/vibe/CommandPalette";
 import { IdeShell } from "@/components/vibe/IdeShell";
@@ -214,6 +215,7 @@ export function AppShell({ repoKey, repoLabel, repoRef, rootPath, graph }: AppSh
       <StatusBar />
       <CommandPalette />
       <CloneDialog />
+      <RecipeDialog />
     </div>
   );
 }

@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  BookOpen,
   CircleAlert,
   CircleDot,
   GitBranch,
@@ -33,6 +34,7 @@ import { toast } from "sonner";
 
 import { loadFile } from "@/lib/file-loader";
 import { refreshWorkspace } from "@/lib/client/agent-stream";
+import { openRecipeDialog } from "@/lib/client/recipes";
 import { isPrUrl } from "@/lib/client/review";
 import { useReview } from "@/store/review";
 import { useViberon, type TerminalSessionView } from "@/store/viberon";
@@ -101,6 +103,13 @@ export function CommandPalette() {
         hint: "Git URL, owner/repo, or a GitHub issue to fix",
         icon: <GitBranch className="size-3.5" />,
         run: () => store.setCloneOpen(true),
+      },
+      {
+        id: "recipe.run",
+        label: "Run recipe…",
+        hint: "A saved multi-step workflow: add tests, fix lint, bump a dependency",
+        icon: <BookOpen className="size-3.5" />,
+        run: () => openRecipeDialog(),
       },
       {
         id: "chat.new",
