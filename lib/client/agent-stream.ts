@@ -170,6 +170,52 @@ export async function sendPrompt(
   });
 }
 
+/**
+ * Run a recipe. `POST /api/recipes/run` streams the same events as
+ * `/api/agent` (the recipe arrives as a plan, one lane per step), and the
+ * run is registered the same way, so Stop and approvals work unchanged.
+ */
+export async function runRecipe(name: string, params: Record<string, string | number | boolean>): Promise<void> {
+  const store = useViberon.getState();
+  if (store.streaming) {
+    toast.error("A run is already in progress. Stop it first.");
+    return;
+  }
+  const { repoKey, settings } = store;
+  if (!repoKey) {
+    toast.error("No workspace is open.");
+    return;
+  }
+  const args = Object.entries(params)
+    .filter(([, v]) => v !== "")
+    .map(([k, v]) => `${k}=${typeof v === "string" && /\s/.test(v) ? JSON.stringify(v) : String(v)}`)
+    .join(" ");
+  const prompt = `/recipe ${name}${args ? ` ${args}` : ""}`;
+  store.appendMessage("user", prompt);
+  store.startRun({ prompt, model: settings.model, mode: "orchestrated", interaction: "agent" });
+  store.appendMessage("assistant", "");
+  await pumpRun({
+    conversational: true,
+    open: (signal) =>
+      isMockMode()
+        ? Promise.resolve(mockResponse(mockScript({ prompt, interaction: "agent" }), signal))
+        : fetch("/api/recipes/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal,
+            body: JSON.stringify({
+              repoKey,
+              name,
+              params,
+              model: settings.model,
+              commandPolicy: settings.commandPolicy,
+              editPolicy: settings.editPolicy,
+              autoCheckpoint: settings.autoCheckpoint,
+            }),
+          }),
+  });
+}
+
 /** The queued task whose event stream the run view is showing, if any. */
 let attachedTaskId: string | null = null;
 

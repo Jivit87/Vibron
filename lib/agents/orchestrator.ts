@@ -250,7 +250,8 @@ function normalizePlan(raw: Record<string, unknown>): RunPlan {
 
 /* --------------------------- engine wiring -------------------------------- */
 
-async function buildEngine(
+/** The context engine over the current graph; also used by recipe runs between steps. */
+export async function buildEngine(
   handle: WorkspaceHandle,
   memory: ProjectMemory,
   ledger: ContextLedger,
@@ -911,7 +912,8 @@ function renderHistory(
     .join("\n\n");
 }
 
-function buildStepTask(step: PlanStep): string {
+/** A plan step's instruction, with its write lock spelled out (recipes reuse it for agent steps). */
+export function buildStepTask(step: PlanStep): string {
   const files = step.files.length
     ? `\n\nFiles you own (you may only write these): ${step.files.map((f) => `\`${f}\``).join(", ")}`
     : "";

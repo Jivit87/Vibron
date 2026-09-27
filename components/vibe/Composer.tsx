@@ -17,11 +17,12 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { ArrowUp, CircleDot, FileText, Folder, Loader2, Square, X } from "lucide-react";
+import { ArrowUp, BookOpen, CircleDot, FileText, Folder, Loader2, Square, X } from "lucide-react";
 
 import { cancelRun, sendPrompt } from "@/lib/client/agent-stream";
 import { fetchIssue, findIssueUrl, issuePrompt } from "@/lib/client/clone";
-import { findMentionTrigger, fuzzyScore, removeTrigger } from "@/lib/composer/parsing";
+import { findMentionTrigger, findSlashTrigger, fuzzyScore, removeTrigger } from "@/lib/composer/parsing";
+import { openRecipeDialog, parseRecipeCommand } from "@/lib/client/recipes";
 import {
   attachmentKey,
   attachmentLabel,
@@ -82,6 +83,11 @@ const SPECIAL_MENTIONS: { id: string; label: string; hint: string }[] = [
   { id: "terminal", label: "terminal", hint: "Active terminal output" },
 ];
 
+/** Slash commands the composer handles itself instead of sending. */
+const SLASH_COMMANDS: { name: string; hint: string }[] = [
+  { name: "recipe", hint: "Run a saved multi-step recipe" },
+];
+
 type Suggestion =
   | { kind: "file"; path: string; folder: boolean }
   | { kind: "special"; id: string; label: string; hint: string };
@@ -107,6 +113,7 @@ export function Composer({
   const [models, setModels] = useState<ModelOption[]>([]);
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [issue, setIssue] = useState<IssueRef | null>(null);
   const [issueLoading, setIssueLoading] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -215,7 +222,18 @@ export function Composer({
   function syncTrigger(text: string, caret: number) {
     const match = findMentionTrigger(text, caret);
     setTrigger(match);
+    setSlashQuery(match ? null : (findSlashTrigger(text, caret)?.query ?? null));
     setHighlight(0);
+  }
+
+  const commandSuggestions =
+    slashQuery === null ? [] : SLASH_COMMANDS.filter((c) => c.name.startsWith(slashQuery.toLowerCase()));
+
+  /** `/recipe [name] [k=v …]` opens the recipe picker instead of sending a prompt. */
+  function openRecipe(text: string) {
+    openRecipeDialog(parseRecipeCommand(text) ?? {});
+    setValue("");
+    setSlashQuery(null);
   }
 
   function pick(suggestion: Suggestion) {
@@ -255,6 +273,10 @@ export function Composer({
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
+    if (parseRecipeCommand(value)) {
+      openRecipe(value);
+      return;
+    }
     const fixIssue = settings.interaction === "fix" ? issue : null;
     const prompt = fixIssue ? issuePrompt(fixIssue, value) : value.trim();
     if (!prompt || streaming || issueLoading) return;
@@ -267,6 +289,18 @@ export function Composer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (commandSuggestions.length > 0) {
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        openRecipe(value);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSlashQuery(null);
+        return;
+      }
+    }
     if (trigger && suggestions.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -364,6 +398,31 @@ export function Composer({
         </div>
       )}
 
+      {!trigger && commandSuggestions.length > 0 && (
+        <div role="listbox" className="vb-pop absolute bottom-[calc(100%+4px)] left-0 z-50 w-[360px] max-w-full py-1">
+          {commandSuggestions.map((c) => (
+            <button
+              key={c.name}
+              type="button"
+              role="option"
+              aria-selected
+              onMouseDown={(e) => {
+                e.preventDefault();
+                openRecipe(value);
+              }}
+              className="flex h-[24px] w-full items-center gap-2 px-2.5 text-left text-[12.5px]"
+              style={{ background: "var(--vb-accent-soft)", color: "var(--vb-text)" }}
+            >
+              <BookOpen className="size-3.5 shrink-0" style={{ color: "var(--vb-text-dim)" }} />
+              <span className="font-mono">/{c.name}</span>
+              <span className="text-[11.5px]" style={{ color: "var(--vb-text-faint)" }}>
+                {c.hint}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {fixMode && (issue || issueLoading) && (
         <div className="flex px-2 pt-2">
           <span
@@ -427,7 +486,12 @@ export function Composer({
         }}
         onKeyDown={onKeyDown}
         onClick={(e) => syncTrigger(value, e.currentTarget.selectionStart ?? value.length)}
-        onBlur={() => setTimeout(() => setTrigger(null), 100)}
+        onBlur={() =>
+          setTimeout(() => {
+            setTrigger(null);
+            setSlashQuery(null);
+          }, 100)
+        }
         placeholder={
           disabled
             ? "Add an API key in Settings to start"
